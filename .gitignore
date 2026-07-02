@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Outputs (generated files — keep directory structure)
+outputs/*
+!outputs/**/.gitkeep
+
+# Data images (binary files — keep directory structure)
+data/board/*
+!data/board/.gitkeep
+data/chessboard/*
+!data/chessboard/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+*.ipynb_checkpoints/
