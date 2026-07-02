@@ -42,6 +42,9 @@ def load_image(path: Path, flags: int = cv2.IMREAD_COLOR) -> Optional[np.ndarray
     """
     加载单张图像。
 
+    使用 np.fromfile + cv2.imdecode 方式读取，
+    兼容 Windows 下含中文/Unicode 字符的文件路径。
+
     Args:
         path: 图像文件路径
         flags: cv2.imread 的读取标志
@@ -53,15 +56,23 @@ def load_image(path: Path, flags: int = cv2.IMREAD_COLOR) -> Optional[np.ndarray
         print(f"[WARNING] 文件不存在: {path}")
         return None
 
-    img = cv2.imread(str(path), flags)
-    if img is None:
-        print(f"[WARNING] 无法读取图像: {path}")
-    return img
+    try:
+        data = np.fromfile(str(path), dtype=np.uint8)
+        img = cv2.imdecode(data, flags)
+        if img is None:
+            print(f"[WARNING] 无法解码图像: {path}")
+        return img
+    except Exception as e:
+        print(f"[WARNING] 无法读取图像: {path}, 原因: {e}")
+        return None
 
 
 def save_image(image: np.ndarray, path: Path) -> bool:
     """
     保存图像到指定路径，自动创建父目录。
+
+    使用 cv2.imencode + tofile 方式保存，
+    兼容 Windows 下含中文/Unicode 字符的文件路径。
 
     Args:
         image: 图像数组
@@ -72,10 +83,18 @@ def save_image(image: np.ndarray, path: Path) -> bool:
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    success = cv2.imwrite(str(path), image)
-    if not success:
-        print(f"[ERROR] 图像保存失败: {path}")
-    return success
+    try:
+        ext = path.suffix
+        success, data = cv2.imencode(ext, image)
+        if success:
+            data.tofile(str(path))
+            return True
+        else:
+            print(f"[ERROR] 图像编码失败: {path}")
+            return False
+    except Exception as e:
+        print(f"[ERROR] 图像保存失败: {path}, 原因: {e}")
+        return False
 
 
 # ============================================================
@@ -132,7 +151,7 @@ class DetectionResult:
         self.message = message
 
     def __repr__(self) -> str:
-        status = "✓" if self.success else "✗"
+        status = "[OK]" if self.success else "[FAIL]"
         return f"DetectionResult({status}) {self.message}"
 
     def __bool__(self) -> bool:
