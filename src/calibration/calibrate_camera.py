@@ -30,7 +30,7 @@ def get_subpix_criteria() -> Tuple[int, int, float]:
 
 def load_chessboard_images() -> List[Path]:
     """加载棋盘格标定图像路径列表。"""
-    paths = get_image_paths(config.CHESSBOARD_IMAGE_DIR)
+    paths = get_image_paths(config.CALIB_IMAGE_DIR)
     print(f"[INFO] 找到 {len(paths)} 张棋盘格标定图像")
     return paths
 
@@ -189,7 +189,7 @@ def run_calibration() -> None:
     image_paths = load_chessboard_images()
     if len(image_paths) == 0:
         print("[ERROR] 未找到棋盘格标定图像，请将图像放入:")
-        print(f"  {config.CHESSBOARD_IMAGE_DIR}")
+        print(f"  {config.CALIB_IMAGE_DIR}")
         return
 
     print(f"\n[INFO] 棋盘格内角点数量: {config.CHESSBOARD_PATTERN_SIZE}")

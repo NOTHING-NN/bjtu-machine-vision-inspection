@@ -82,7 +82,7 @@ def save_baseline_steps(
 ) -> None:
     """保存普通预处理各步骤的中间结果图像。"""
     if output_dir is None:
-        output_dir = config.BASELINE_OUTPUT_DIR
+        output_dir = config.EXPERIMENTS_OUTPUT_DIR / "algorithm_a"
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -100,4 +100,4 @@ def save_baseline_steps(
             out_path = output_dir / f"{image_name}_{suffix}{config.OUTPUT_IMAGE_EXT}"
             save_image(results[key], out_path)
 
-    print(f"  [INFO] 普通预处理中间结果已保存到: {output_dir}")
+    print(f"  [INFO] 算法A预处理中间结果已保存到: {output_dir}")

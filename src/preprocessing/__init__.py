@@ -2,8 +2,8 @@
 src.preprocessing — 预处理层
 
 提供两种可替换预处理策略：
-  - baseline:             普通灰度化/G通道 + 高斯滤波 + 自适应阈值 + Canny
-  - light_corrected:      光照场估计 + 高光抑制 + 暗区提升 + CLAHE
+  - standard (原 baseline):    普通灰度化/G通道 + 高斯滤波 + 自适应阈值 + Canny
+  - highlight_aware (原 light_corrected): 光照场估计 + 高光抑制 + 暗区提升 + CLAHE
 
 两种策略输出统一格式的 dict，后续检测模块可选择使用其中的
 mask、corrected_image 等中间结果。
@@ -20,13 +20,17 @@ from src.preprocessing.baseline import preprocess_baseline, save_baseline_steps
 from src.preprocessing.illumination import compute_illumination_field, boost_shadows
 from src.preprocessing.highlight import detect_highlights, suppress_highlights
 
+# 别名：保持向后兼容的同时提供新命名
+preprocess_standard = preprocess_baseline
+save_standard_steps = save_baseline_steps
 
-def preprocess_light_corrected(
+
+def preprocess_highlight_aware(
     image: np.ndarray,
     camera_params: Optional[Tuple[np.ndarray, np.ndarray]] = None,
 ) -> Dict[str, np.ndarray]:
     """
-    光照矫正预处理全流程（实验组）。
+    强光斑感知预处理全流程（算法 B 专用）。
 
     流程：
       1. 畸变校正
@@ -60,6 +64,7 @@ def preprocess_light_corrected(
         corrected_bgr = undistort_image(image, cm, dc)
     else:
         corrected_bgr = image.copy()
+    results["undistorted"] = corrected_bgr
 
     # 2. BGR → HSV
     hsv = cv2.cvtColor(corrected_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
@@ -107,17 +112,17 @@ def preprocess_light_corrected(
     return results
 
 
-def save_light_corrected_steps(
+def save_highlight_aware_steps(
     results: Dict[str, np.ndarray],
     image_name: str,
-    output_dir: Optional[Path] = None,
+    output_dir=None,
 ) -> None:
-    """保存光照矫正预处理各步骤的中间结果图像。"""
+    """保存强光斑感知预处理各步骤的中间结果图像。"""
     from pathlib import Path
     from src.utils import save_image as _save_image
 
     if output_dir is None:
-        output_dir = config.LIGHT_CORRECTED_OUTPUT_DIR
+        output_dir = config.EXPERIMENTS_OUTPUT_DIR / "algorithm_b"
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -136,4 +141,9 @@ def save_light_corrected_steps(
             out_path = output_dir / f"{image_name}_{suffix}{config.OUTPUT_IMAGE_EXT}"
             _save_image(results[key], out_path)
 
-    print(f"  [INFO] 光照矫正中间结果已保存到: {output_dir}")
+    print(f"  [INFO] 算法B预处理中间结果已保存到: {output_dir}")
+
+
+# 向后兼容别名
+preprocess_light_corrected = preprocess_highlight_aware
+save_light_corrected_steps = save_highlight_aware_steps

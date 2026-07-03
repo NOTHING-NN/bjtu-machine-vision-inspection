@@ -11,4 +11,5 @@ src.board_detection — PCB 外框检测层
 from src.board_detection.board_detector import detect_board
 from src.board_detection.candidate_filter import find_board_contours
 from src.board_detection.region_separation import separate_highlight_from_mask
+from src.board_detection.quad_recovery import recover_quad_from_mask
 from src.board_detection.perspective import order_corners, compute_homography, warp_board

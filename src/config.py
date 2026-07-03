@@ -14,20 +14,19 @@ from pathlib import Path
 # 项目根目录
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# 电路板图像目录（待测 PCB 图像）
-BOARD_IMAGE_DIR = PROJECT_ROOT / "data" / "board"
+# PCB 待测图像目录
+PCB_IMAGE_DIR = PROJECT_ROOT / "data" / "pcb"
 
 # 棋盘格标定图像目录
-CHESSBOARD_IMAGE_DIR = PROJECT_ROOT / "data" / "chessboard"
+CALIB_IMAGE_DIR = PROJECT_ROOT / "data" / "calibration"
 
 # 输出根目录
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
 # 各子输出目录
 CALIB_OUTPUT_DIR = OUTPUT_DIR / "calibration"
-BASELINE_OUTPUT_DIR = OUTPUT_DIR / "baseline"
-LIGHT_CORRECTED_OUTPUT_DIR = OUTPUT_DIR / "light_corrected"
-COMPARISON_OUTPUT_DIR = OUTPUT_DIR / "comparison"
+EXPERIMENTS_OUTPUT_DIR = OUTPUT_DIR / "experiments"
+REPORTS_OUTPUT_DIR = OUTPUT_DIR / "reports"
 
 # ============================================================
 # 2. 标定参数
@@ -141,21 +140,7 @@ HIGHLIGHT_DILATE_KERNEL_SIZE = (9, 9)
 REGION_SEPARATION_OPEN_KERNEL_SIZE = (5, 5)
 
 # ============================================================
-# 6. 样本光照类型映射
-# ============================================================
-
-SAMPLE_TYPE_MAP = {
-    "01": "A",   # 板面反光
-    "02": "A",
-    "03": "A",
-    "04": "A",
-    "05": "B",   # 邻近强光斑
-    "06": "B",
-    "07": "B",
-}
-
-# ============================================================
-# 7. 输出控制参数
+# 6. 输出控制参数
 # ============================================================
 
 # 是否保存中间处理步骤图像
@@ -171,7 +156,7 @@ FIGURE_DPI = 150
 OUTPUT_IMAGE_EXT = ".png"
 
 # ============================================================
-# 8. 图像文件扩展名过滤
+# 7. 图像文件扩展名过滤
 # ============================================================
 
 IMAGE_EXTENSIONS = {".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff"}
@@ -182,9 +167,8 @@ def ensure_output_dirs() -> None:
     from pathlib import Path
     dirs = [
         CALIB_OUTPUT_DIR,
-        BASELINE_OUTPUT_DIR,
-        LIGHT_CORRECTED_OUTPUT_DIR,
-        COMPARISON_OUTPUT_DIR,
+        EXPERIMENTS_OUTPUT_DIR,
+        REPORTS_OUTPUT_DIR,
     ]
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)

@@ -26,7 +26,7 @@ def separate_highlight_from_mask(
     green_mask: np.ndarray,
     highlight_mask: np.ndarray,
     image_shape: Tuple[int, int],
-) -> np.ndarray:
+) -> Tuple[np.ndarray, bool]:
     """
     利用高光 mask 切除 green_mask 中与反光粘连的区域。
 
@@ -36,7 +36,9 @@ def separate_highlight_from_mask(
         image_shape:    原图尺寸 (h, w)
 
     Returns:
-        清理后的 green_mask。如果分离后无合法候选，返回原始 mask。
+        (cleaned_mask, was_modified)
+        - cleaned_mask: 清理后的 green_mask
+        - was_modified: 是否实际执行了分离操作
     """
     h, w = image_shape[:2]
     margin = config.BOUNDARY_MARGIN_PX
@@ -84,7 +86,7 @@ def separate_highlight_from_mask(
         modified = True
 
     if not modified:
-        return green_mask
+        return green_mask, False
 
     # 5. 形态学开运算断开可能残留的细连接
     open_kernel = cv2.getStructuringElement(
@@ -104,7 +106,7 @@ def separate_highlight_from_mask(
     if len(candidates) == 0:
         # 分离过度，返回原始 mask
         print("  [INFO] 区域分离后无合法候选，回退到原始 mask")
-        return green_mask
+        return green_mask, False
 
     print(f"  [INFO] 区域分离完成，产生 {len(candidates)} 个候选")
-    return gm_filled
+    return gm_filled, modified

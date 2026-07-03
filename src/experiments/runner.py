@@ -21,8 +21,13 @@ from src.utils import get_image_paths, load_image
 from src.calibration import load_camera_params, undistort_image
 from src.preprocessing import preprocess_baseline, preprocess_light_corrected
 from src.preprocessing.masks import segment_pcb_green
-from src.board_detection import detect_board, separate_highlight_from_mask
+from src.board_detection import (
+    detect_board,
+    recover_quad_from_mask,
+    separate_highlight_from_mask,
+)
 from src.measurement import detect_all_holes, run_measurement, summarize_measurements
+from src.experiments.configs import ExperimentConfig, SAMPLE_TYPE_MAP
 
 
 # ============================================================
@@ -46,7 +51,7 @@ def process_single(
         包含测量结果和中间产物的 dict
     """
     image_name = image_path.stem
-    sample_type = config.SAMPLE_TYPE_MAP.get(image_name, "?")
+    sample_type = SAMPLE_TYPE_MAP.get(image_name, "?")
     method = exp_config.name
 
     print(f"\n{'─'*50}")
@@ -58,10 +63,10 @@ def process_single(
         return _failure_result(image_name, sample_type, method, "图像加载失败")
 
     # ---- 预处理 ----
-    if exp_config.preprocessing == "baseline":
+    if exp_config.preprocessing == "standard":
         preproc_results = preprocess_baseline(image, camera_params)
         corrected = preproc_results["corrected"]
-    elif exp_config.preprocessing == "illumination_corrected":
+    elif exp_config.preprocessing == "highlight_aware":
         preproc_results = preprocess_light_corrected(image, camera_params)
         corrected = preproc_results["corrected"]
     else:
@@ -71,17 +76,39 @@ def process_single(
     # ---- 板检测 ----
     # 生成 green_mask 并可选地应用区域分离
     green_mask = segment_pcb_green(corrected)
+    measurement_image = preproc_results.get("undistorted", corrected)
+
+    # 记录分离前连通域数量
+    n_components_before = _count_connected_components(green_mask)
 
     separation_applied = False
+    separation_modified = False
     if exp_config.region_separation:
         highlight_mask = preproc_results.get("highlight_mask")
         if highlight_mask is not None and highlight_mask.max() > 0:
             h, w = corrected.shape[:2]
-            green_mask = separate_highlight_from_mask(
+            green_mask, separation_modified = separate_highlight_from_mask(
                 green_mask, highlight_mask, (h, w))
             separation_applied = True
 
-    board_result = detect_board(corrected, mask_override=green_mask)
+    # 记录分离后连通域数量
+    n_components_after = _count_connected_components(green_mask)
+
+    board_result = detect_board(measurement_image, mask_override=green_mask)
+    quad_recovery_used = False
+
+    if (not board_result.success) and exp_config.region_separation:
+        recovered = recover_quad_from_mask(green_mask)
+        if recovered is not None:
+            corners, score, recovery_diag = recovered
+            board_result = detect_board(
+                measurement_image,
+                mask_override=green_mask,
+                candidates_override=[(corners, score)],
+            )
+            if board_result.success:
+                quad_recovery_used = True
+                board_result.data["quad_recovery"] = recovery_diag
 
     if not board_result.success:
         return _failure_result(
@@ -90,6 +117,9 @@ def process_single(
             preproc_results=preproc_results,
             board_result=board_result,
             separation_applied=separation_applied,
+            num_components_before=n_components_before,
+            num_components_after=n_components_after,
+            separation_modified=separation_modified,
         )
 
     # ---- 孔检测 ----
@@ -107,8 +137,12 @@ def process_single(
         remark_parts.append(f"Board: {board_result.message}")
     if not hole_result.success:
         remark_parts.append(f"Holes: {hole_result.message}")
-    if separation_applied:
-        remark_parts.append("region_separation=on")
+    if separation_modified:
+        remark_parts.append("region_separation=modified")
+    elif separation_applied:
+        remark_parts.append("region_separation=attempted")
+    if quad_recovery_used:
+        remark_parts.append("quad_recovery=row_interval")
 
     return {
         "image_name": image_name,
@@ -119,6 +153,13 @@ def process_single(
         "num_holes": sum(hole_result.data.get("individual_success", [False] * 4)),
         **measurement,
         "remark": " | ".join(remark_parts).strip(),
+        # 新增统计字段
+        "board_score": board_result.data.get("score") if board_result.success else None,
+        "num_components_before": n_components_before,
+        "num_components_after": n_components_after,
+        "separation_modified": separation_modified,
+        "quad_recovery_used": quad_recovery_used,
+        # 详细中间产物
         "preproc_results": preproc_results,
         "board_result": board_result,
         "hole_result": hole_result,
@@ -127,11 +168,23 @@ def process_single(
     }
 
 
+def _count_connected_components(mask: np.ndarray) -> int:
+    """计算二值 mask 中的连通域数量（不含背景）。"""
+    if mask is None:
+        return 0
+    _, labels = cv2.connectedComponents(
+        (mask > 0).astype(np.uint8), connectivity=8)
+    return max(0, labels.max() - 1)  # 减去背景 label 0
+
+
 def _failure_result(image_name: str, sample_type: str, method: str,
                     message: str,
                     preproc_results: Dict = None,
                     board_result=None,
-                    separation_applied: bool = False) -> Dict:
+                    separation_applied: bool = False,
+                    num_components_before: int = 0,
+                    num_components_after: int = 0,
+                    separation_modified: bool = False) -> Dict:
     """构造检测失败时的结果 dict。"""
     remark = message
     if separation_applied:
@@ -153,6 +206,11 @@ def _failure_result(image_name: str, sample_type: str, method: str,
         "mean_pitch_mm": np.nan,
         "mean_abs_error_mm": np.nan,
         "remark": remark,
+        "board_score": None,
+        "num_components_before": num_components_before,
+        "num_components_after": num_components_after,
+        "separation_modified": separation_modified,
+        "quad_recovery_used": False,
         "preproc_results": preproc_results or {},
         "board_result": board_result,
         "hole_result": None,
@@ -211,6 +269,10 @@ def save_results_csv(results: List[Dict], output_path: Path) -> pd.DataFrame:
         "abs_error_x_mm", "abs_error_y_mm",
         "rel_error_x_pct", "rel_error_y_pct",
         "mean_pitch_mm", "mean_abs_error_mm",
+        "board_score",
+        "separation_applied", "separation_modified",
+        "quad_recovery_used",
+        "num_components_before", "num_components_after",
         "remark",
     ]
 
@@ -223,10 +285,11 @@ def save_results_csv(results: List[Dict], output_path: Path) -> pd.DataFrame:
 
 
 def print_grouped_summary(all_results: List[Dict]) -> None:
-    """按样本类型分组打印汇总统计。"""
-    # 分离有效测量
-    valid = [r for r in all_results
-             if r.get("board_detect_success") and r.get("holes_detect_success")]
+    """按样本类型分组打印汇总统计。算法 B 仅统计 B 类样本。"""
+    method_labels = {
+        "algorithm_a": "算法 A (基础测量)",
+        "algorithm_b": "算法 B (强光斑感知改进)",
+    }
 
     def stats_for(subset):
         if not subset:
@@ -245,22 +308,48 @@ def print_grouped_summary(all_results: List[Dict]) -> None:
             "max_error": float(np.max(arr)),
         }
 
-    for method in ["baseline", "light_corrected"]:
+    for method in ["algorithm_a", "algorithm_b"]:
         method_results = [r for r in all_results if r.get("method") == method]
+        if not method_results:
+            continue
+
         print(f"\n{'─'*50}")
-        print(f"  [{method}]")
-        for stype, label in [("A", "板面反光"), ("B", "邻近强光斑")]:
-            subset = [r for r in method_results if r.get("sample_type") == stype]
+        print(f"  [{method_labels.get(method, method)}]")
+
+        if method == "algorithm_a":
+            # 算法 A：A 类 + B 类
+            for stype, label in [("A", "板面反光"), ("B", "邻近强光斑")]:
+                subset = [r for r in method_results if r.get("sample_type") == stype]
+                s = stats_for(subset)
+                if s:
+                    print(f"  {stype} 类 ({label}): "
+                          f"板检测 {s['n_board_ok']}/{s['n_images']}, "
+                          f"孔检测 {s['n_holes_ok']}/{s['n_images']}, "
+                          f"误差 mean={s['mean_error']:.3f} mm, "
+                          f"std={s['std_error']:.3f} mm")
+        else:
+            # 算法 B：仅 B 类
+            subset = [r for r in method_results if r.get("sample_type") == "B"]
             s = stats_for(subset)
             if s:
-                print(f"  {stype} 类 ({label}): "
+                quad_count = sum(1 for r in subset if r.get("quad_recovery_used"))
+                print(f"  B 类 (邻近强光斑): "
                       f"板检测 {s['n_board_ok']}/{s['n_images']}, "
-                      f"孔检测 {s['n_holes_ok']}/{s['n_images']}, "
-                      f"误差 mean={s['mean_error']:.3f} mm, "
-                      f"std={s['std_error']:.3f} mm")
+                      f"孔检测 {s['n_holes_ok']}/{s['n_images']}")
+                if s['n_holes_ok'] > 0:
+                    print(f"  误差 mean={s['mean_error']:.3f} mm, "
+                          f"std={s['std_error']:.3f} mm")
+                if quad_count > 0:
+                    print(f"  四边形恢复: {quad_count}/{s['n_images']}")
+
         # 全量
         all_s = stats_for(method_results)
         if all_s:
-            print(f"  全部: "
+            scope = "全部样本" if method == "algorithm_a" else "B 类样本"
+            err_part = ""
+            if all_s["n_holes_ok"] > 0:
+                err_part = f", 误差 mean={all_s['mean_error']:.3f} mm"
+            print(f"  [{scope}]: "
                   f"板检测 {all_s['n_board_ok']}/{all_s['n_images']}, "
-                  f"误差 mean={all_s['mean_error']:.3f} mm")
+                  f"孔检测 {all_s['n_holes_ok']}/{all_s['n_images']}"
+                  f"{err_part}")

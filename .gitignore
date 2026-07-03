@@ -17,10 +17,10 @@ outputs/*
 !outputs/**/.gitkeep
 
 # Data images (binary files — keep directory structure)
-data/board/*
-!data/board/.gitkeep
-data/chessboard/*
-!data/chessboard/.gitkeep
+data/pcb/*
+!data/pcb/.gitkeep
+data/calibration/*
+!data/calibration/.gitkeep
 
 # OS
 .DS_Store
