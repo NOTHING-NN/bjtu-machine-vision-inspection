@@ -159,22 +159,25 @@ def main() -> None:
         report_text = format_statistics_table(all_results)
         print(report_text)
 
-        # ---- 汇总对比 CSV ----
-        valid_a = [r for r in results_a
-                   if r.get("board_detect_success") and r.get("holes_detect_success")]
+        # ---- 汇总对比 CSV (只在 B 类样本上公平对比) ----
+        valid_a_b = [r for r in results_a
+                     if r.get("sample_type") == "B"
+                     and r.get("board_detect_success")
+                     and r.get("holes_detect_success")]
         valid_b = [r for r in results_b
                    if r.get("board_detect_success") and r.get("holes_detect_success")]
 
         from src.measurement import summarize_measurements
-        summary_a = summarize_measurements(valid_a)
-        summary_b = summarize_measurements(valid_b)
+        summary_a_b = summarize_measurements(valid_a_b) if valid_a_b else {}
+        summary_b = summarize_measurements(valid_b) if valid_b else {}
 
         comparison_rows = []
-        for key in sorted(summary_a.keys()):
+        all_metric_keys = sorted(set(summary_a_b.keys()) | set(summary_b.keys()))
+        for key in all_metric_keys:
             if key == "num_images":
                 continue
-            v_a = summary_a.get(key, np.nan)
-            v_b = summary_b.get(key, np.nan) if summary_b else np.nan
+            v_a = summary_a_b.get(key, np.nan)
+            v_b = summary_b.get(key, np.nan)
             comparison_rows.append({
                 "metric": key,
                 "algorithm_a": v_a,
@@ -189,22 +192,24 @@ def main() -> None:
         # ---- 简要结论 ----
         n_a = len(results_a)
         n_b = len(results_b)
-        n_a_ok = len(valid_a)
+        n_a_ok_all = sum(1 for r in results_a
+                         if r.get("board_detect_success") and r.get("holes_detect_success"))
         n_b_ok = len(valid_b)
 
         print(f"\n  算法 A (基础测量，全部 {n_a} 张):")
         print(f"    板检测成功: {sum(1 for r in results_a if r['board_detect_success'])}/{n_a}")
-        print(f"    孔检测成功: {n_a_ok}/{n_a}")
+        print(f"    孔检测成功: {n_a_ok_all}/{n_a}")
 
         print(f"\n  算法 B (强光斑感知改进，仅 B 类 {n_b} 张):")
         print(f"    板检测成功: {sum(1 for r in results_b if r['board_detect_success'])}/{n_b}")
         print(f"    孔检测成功: {n_b_ok}/{n_b}")
 
-        if summary_a.get("mean_abs_error_mm_mean") and summary_b.get("mean_abs_error_mm_mean"):
-            a_err = summary_a["mean_abs_error_mm_mean"]
+        # 公平对比：仅在 B 类样本上
+        if summary_a_b.get("mean_abs_error_mm_mean") and summary_b.get("mean_abs_error_mm_mean"):
+            a_err = summary_a_b["mean_abs_error_mm_mean"]
             b_err = summary_b["mean_abs_error_mm_mean"]
-            print(f"\n  平均孔距绝对误差:")
-            print(f"    算法 A:  {a_err:.4f} mm")
+            print(f"\n  平均孔距绝对误差 (仅 B 类样本对比):")
+            print(f"    算法 A:  {'N/A (B 类全部失败)' if not valid_a_b else f'{a_err:.4f} mm'}")
             print(f"    算法 B:  {b_err:.4f} mm")
 
         print(f"\n  输出文件位于: {config.REPORTS_OUTPUT_DIR}")

@@ -17,17 +17,17 @@ import numpy as np
 import pandas as pd
 
 from src import config
-from src.utils import get_image_paths, load_image
-from src.calibration import load_camera_params, undistort_image
-from src.preprocessing import preprocess_baseline, preprocess_light_corrected
+from src.utils import load_image
+from src.calibration import load_camera_params
+from src.preprocessing import preprocess_standard, preprocess_highlight_aware
 from src.preprocessing.masks import segment_pcb_green
 from src.board_detection import (
     detect_board,
     recover_quad_from_mask,
     separate_highlight_from_mask,
 )
-from src.measurement import detect_all_holes, run_measurement, summarize_measurements
-from src.experiments.configs import ExperimentConfig, SAMPLE_TYPE_MAP
+from src.measurement import detect_all_holes, run_measurement
+from src.experiments.configs import SAMPLE_TYPE_MAP
 
 
 # ============================================================
@@ -64,10 +64,10 @@ def process_single(
 
     # ---- 预处理 ----
     if exp_config.preprocessing == "standard":
-        preproc_results = preprocess_baseline(image, camera_params)
+        preproc_results = preprocess_standard(image, camera_params)
         corrected = preproc_results["corrected"]
     elif exp_config.preprocessing == "highlight_aware":
-        preproc_results = preprocess_light_corrected(image, camera_params)
+        preproc_results = preprocess_highlight_aware(image, camera_params)
         corrected = preproc_results["corrected"]
     else:
         return _failure_result(image_name, sample_type, method,
@@ -133,8 +133,6 @@ def process_single(
     measurement = run_measurement(hole_result, board_size_px)
 
     remark_parts = []
-    if not board_result.success:
-        remark_parts.append(f"Board: {board_result.message}")
     if not hole_result.success:
         remark_parts.append(f"Holes: {hole_result.message}")
     if separation_modified:
@@ -294,18 +292,24 @@ def print_grouped_summary(all_results: List[Dict]) -> None:
     def stats_for(subset):
         if not subset:
             return None
-        errors = [r["mean_abs_error_mm"] for r in subset]
-        arr = np.array(errors)
         n_total = len(subset)
-        n_ok = len([r for r in subset if r.get("board_detect_success")])
+        n_board_ok = len([r for r in subset if r.get("board_detect_success")])
+        valid = [
+            r for r in subset
+            if r.get("board_detect_success")
+            and r.get("holes_detect_success")
+            and np.isfinite(r.get("mean_abs_error_mm", np.nan))
+        ]
+        errors = [r["mean_abs_error_mm"] for r in valid]
+        arr = np.array(errors, dtype=float)
         return {
             "n_images": n_total,
-            "n_board_ok": n_ok,
-            "n_holes_ok": len(errors),
-            "mean_error": float(np.mean(arr)),
+            "n_board_ok": n_board_ok,
+            "n_holes_ok": len(valid),
+            "mean_error": float(np.mean(arr)) if len(errors) else np.nan,
             "std_error": float(np.std(arr, ddof=1)) if len(errors) > 1 else 0.0,
-            "min_error": float(np.min(arr)),
-            "max_error": float(np.max(arr)),
+            "min_error": float(np.min(arr)) if len(errors) else np.nan,
+            "max_error": float(np.max(arr)) if len(errors) else np.nan,
         }
 
     for method in ["algorithm_a", "algorithm_b"]:

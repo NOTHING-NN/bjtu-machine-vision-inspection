@@ -47,6 +47,7 @@ def detect_hole_in_roi(
     roi_gray: np.ndarray,
     min_radius: int = 10,
     max_radius: int = 300,
+    expected_center: Optional[Tuple[float, float]] = None,
 ) -> Optional[Tuple[float, float, float]]:
     """
     在单个 ROI 灰度图中检测圆孔。
@@ -57,6 +58,10 @@ def detect_hole_in_roi(
         (cx, cy, r) 相对于 ROI 的圆心和半径，失败返回 None
     """
     candidates = []
+    roi_h, roi_w = roi_gray.shape[:2]
+    if expected_center is None:
+        expected_center = (roi_w / 2.0, roi_h / 2.0)
+    max_center_dist = max(np.hypot(roi_w, roi_h) * 0.5, 1.0)
 
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(roi_gray)
@@ -94,8 +99,16 @@ def detect_hole_in_roi(
             if r < min_radius or r > max_radius:
                 continue
 
-            score = 0.5 * circularity + 0.5 * (
-                1.0 - abs(area - np.pi * r * r) / max(np.pi * r * r, 1.0))
+            area_score = (
+                1.0 - abs(area - np.pi * r * r) / max(np.pi * r * r, 1.0)
+            )
+            center_dist = np.hypot(cx - expected_center[0], cy - expected_center[1])
+            position_score = 1.0 - min(center_dist / max_center_dist, 1.0)
+            score = (
+                0.40 * circularity +
+                0.35 * area_score +
+                0.25 * position_score
+            )
             candidates.append((score, cx, cy, r))
 
     circles = cv2.HoughCircles(
@@ -106,7 +119,10 @@ def detect_hole_in_roi(
     )
     if circles is not None:
         for c in circles[0]:
-            candidates.append((0.5, float(c[0]), float(c[1]), float(c[2])))
+            cx, cy, r = float(c[0]), float(c[1]), float(c[2])
+            center_dist = np.hypot(cx - expected_center[0], cy - expected_center[1])
+            position_score = 1.0 - min(center_dist / max_center_dist, 1.0)
+            candidates.append((0.45 + 0.35 * position_score, cx, cy, r))
 
     if not candidates:
         return None
@@ -168,7 +184,8 @@ def detect_all_holes(
         y2 = min(h, ey + roi_half)
         roi_gray = warped_gray[y1:y2, x1:x2]
 
-        result = detect_hole_in_roi(roi_gray, min_r, max_r)
+        expected_in_roi = (ex - x1, ey - y1)
+        result = detect_hole_in_roi(roi_gray, min_r, max_r, expected_in_roi)
 
         if result is not None:
             cx_roi, cy_roi, r = result
