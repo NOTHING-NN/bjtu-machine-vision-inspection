@@ -43,6 +43,18 @@ def _find_result_by_name(results: List[dict], name: str) -> dict:
     return None
 
 
+def _load_measurement_context():
+    """加载相机参数和棋盘格测量平面单应性。"""
+    from src.calibration import load_camera_params, load_measurement_plane_homography
+
+    camera_params = load_camera_params()
+    image_to_world = load_measurement_plane_homography()
+    if image_to_world is None:
+        print("[ERROR] 缺少测量平面单应性，不能进行毫米尺寸测量。")
+        print("        请先运行: python main.py calibrate")
+    return camera_params, image_to_world
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         print("用法:")
@@ -59,7 +71,6 @@ def main() -> None:
         run_calibration()
 
     elif command in ("algorithm-a", "baseline"):
-        from src.calibration import load_camera_params
         from src.experiments import (
             ALGORITHM_A_CONFIG, run_experiment, save_results_csv, print_grouped_summary
         )
@@ -67,19 +78,20 @@ def main() -> None:
         from src import config
 
         config.ensure_output_dirs()
-        camera_params = load_camera_params()
+        camera_params, image_to_world = _load_measurement_context()
+        if image_to_world is None:
+            sys.exit(1)
         paths = get_image_paths(config.PCB_IMAGE_DIR)
         if len(paths) == 0:
             print(f"[ERROR] 未找到 PCB 图像: {config.PCB_IMAGE_DIR}")
             sys.exit(1)
 
-        results = run_experiment(ALGORITHM_A_CONFIG, paths, camera_params)
+        results = run_experiment(ALGORITHM_A_CONFIG, paths, camera_params, image_to_world)
         save_results_csv(results,
                          config.REPORTS_OUTPUT_DIR / "measurements_algorithm_a.csv")
         print_grouped_summary(results)
 
     elif command in ("algorithm-b", "light_corrected"):
-        from src.calibration import load_camera_params
         from src.experiments import (
             ALGORITHM_B_CONFIG, run_experiment, save_results_csv, print_grouped_summary
         )
@@ -87,7 +99,9 @@ def main() -> None:
         from src import config
 
         config.ensure_output_dirs()
-        camera_params = load_camera_params()
+        camera_params, image_to_world = _load_measurement_context()
+        if image_to_world is None:
+            sys.exit(1)
         all_paths = get_image_paths(config.PCB_IMAGE_DIR)
         paths = _filter_b_samples(all_paths)
         if len(paths) == 0:
@@ -95,7 +109,7 @@ def main() -> None:
             sys.exit(0)
 
         print(f"[INFO] 算法 B 仅处理 B 类样本: {[p.name for p in paths]}")
-        results = run_experiment(ALGORITHM_B_CONFIG, paths, camera_params)
+        results = run_experiment(ALGORITHM_B_CONFIG, paths, camera_params, image_to_world)
         save_results_csv(results,
                          config.REPORTS_OUTPUT_DIR / "measurements_algorithm_b.csv")
         print_grouped_summary(results)
@@ -103,7 +117,6 @@ def main() -> None:
     elif command == "compare":
         import numpy as np
         import pandas as pd
-        from src.calibration import load_camera_params
         from src.experiments import (
             ALGORITHM_A_CONFIG, ALGORITHM_B_CONFIG,
             run_experiment, save_results_csv,
@@ -114,7 +127,9 @@ def main() -> None:
         from src import config
 
         config.ensure_output_dirs()
-        camera_params = load_camera_params()
+        camera_params, image_to_world = _load_measurement_context()
+        if image_to_world is None:
+            sys.exit(1)
         all_paths = get_image_paths(config.PCB_IMAGE_DIR)
         if len(all_paths) == 0:
             print(f"[ERROR] 未找到 PCB 图像: {config.PCB_IMAGE_DIR}")
@@ -129,7 +144,7 @@ def main() -> None:
         print(f"\n{'='*60}")
         print("  算法 A (基础测量) — 全部样本")
         print(f"{'='*60}")
-        results_a = run_experiment(ALGORITHM_A_CONFIG, all_paths, camera_params)
+        results_a = run_experiment(ALGORITHM_A_CONFIG, all_paths, camera_params, image_to_world)
         save_results_csv(results_a,
                          config.REPORTS_OUTPUT_DIR / "measurements_algorithm_a.csv")
 
@@ -139,7 +154,7 @@ def main() -> None:
             print(f"\n{'='*60}")
             print("  算法 B (强光斑感知改进) — 仅 B 类样本")
             print(f"{'='*60}")
-            results_b = run_experiment(ALGORITHM_B_CONFIG, paths_b, camera_params)
+            results_b = run_experiment(ALGORITHM_B_CONFIG, paths_b, camera_params, image_to_world)
             save_results_csv(results_b,
                              config.REPORTS_OUTPUT_DIR / "measurements_algorithm_b.csv")
         else:
@@ -211,6 +226,39 @@ def main() -> None:
             print(f"\n  平均孔距绝对误差 (仅 B 类样本对比):")
             print(f"    算法 A:  {'N/A (B 类全部失败)' if not valid_a_b else f'{a_err:.4f} mm'}")
             print(f"    算法 B:  {b_err:.4f} mm")
+
+        # 板尺寸 (A 类有效数据)
+        valid_a_all = [r for r in results_a
+                       if r.get("board_detect_success") and r.get("holes_detect_success")]
+        if valid_a_all:
+            from src.measurement import summarize_measurements
+            s_all = summarize_measurements(valid_a_all)
+            bw = s_all.get("board_width_mm_mean")
+            bh = s_all.get("board_height_mm_mean")
+            bwe = s_all.get("board_width_error_mm_mean")
+            bhe = s_all.get("board_height_error_mm_mean")
+            if bw and bh:
+                print(f"\n  板尺寸测量 (算法 A, 棋盘格测量平面):")
+                print(f"    宽 (W): {bw:.3f} mm  (误差: {bwe:.3f} mm)")
+                print(f"    高 (H): {bh:.3f} mm  (误差: {bhe:.3f} mm)")
+            res = s_all.get("resolution_mean_mm_per_px_mean")
+            density = s_all.get("resolution_mean_px_per_mm_mean")
+            if res is not None and not np.isnan(res):
+                print(f"\n  测量分辨率 (算法 A):")
+                print(f"    平均: {res:.5f} mm/px  ({res * 1000.0:.2f} um/px)")
+                print(f"    采样密度: {density:.2f} px/mm")
+
+        # 孔直径
+        if valid_a_all:
+            dia_strs = []
+            for i in range(1, 5):
+                k = f"hole{i}_diameter_mm_mean"
+                v = s_all.get(k)
+                if v is not None and not np.isnan(v):
+                    dia_strs.append(f"H{i}={v:.2f} mm")
+            if dia_strs:
+                print(f"\n  安装孔直径 (算法 A):")
+                print(f"    {',  '.join(dia_strs)}")
 
         print(f"\n  输出文件位于: {config.REPORTS_OUTPUT_DIR}")
 

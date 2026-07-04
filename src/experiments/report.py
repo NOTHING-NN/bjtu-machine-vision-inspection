@@ -101,14 +101,48 @@ def draw_measurement_text(
     pitch_y_mm: float,
     abs_error_x: float,
     abs_error_y: float,
+    board_width_mm: float = np.nan,
+    board_height_mm: float = np.nan,
+    board_width_error_mm: float = np.nan,
+    board_height_error_mm: float = np.nan,
+    hole_diameters_mm: List[float] = None,
+    hole_centers_world_mm: List[Tuple[float, float]] = None,
 ) -> np.ndarray:
-    """在图像上叠加测量结果文字。"""
+    """在图像上叠加测量结果文字（板尺寸+孔距+孔直径+孔心坐标）。"""
     vis = image.copy()
 
     texts = [
         f"Pitch X: {pitch_x_mm:.3f} mm  (error: {abs_error_x:.3f} mm)",
         f"Pitch Y: {pitch_y_mm:.3f} mm  (error: {abs_error_y:.3f} mm)",
     ]
+
+    # 板尺寸
+    if not np.isnan(board_width_mm):
+        texts.append(
+            f"Board W: {board_width_mm:.3f} mm  (err: {board_width_error_mm:.3f}) [nom 100]"
+        )
+    if not np.isnan(board_height_mm):
+        texts.append(
+            f"Board H: {board_height_mm:.3f} mm  (err: {board_height_error_mm:.3f}) [nom 100]"
+        )
+
+    # 孔直径
+    if hole_diameters_mm is not None:
+        dia_strs = []
+        for i, d in enumerate(hole_diameters_mm, start=1):
+            if not np.isnan(d):
+                dia_strs.append(f"D{i}={d:.2f}")
+        if dia_strs:
+            texts.append("Hole Dia: " + "  ".join(dia_strs) + " mm")
+
+    # 孔心坐标 (world mm)
+    if hole_centers_world_mm is not None:
+        coord_parts = []
+        for i, (cx, cy) in enumerate(hole_centers_world_mm, start=1):
+            if not np.isnan(cx) and not np.isnan(cy):
+                coord_parts.append(f"H{i}({cx:.1f},{cy:.1f})")
+        if coord_parts:
+            texts.append("Hole Pos: " + "  ".join(coord_parts) + " mm")
 
     y0 = 25
     for i, text in enumerate(texts):
@@ -306,6 +340,12 @@ def generate_report_figures(
                     algo_a_result["pitch_y_mm"],
                     algo_a_result["abs_error_x_mm"],
                     algo_a_result["abs_error_y_mm"],
+                    algo_a_result.get("board_width_mm", np.nan),
+                    algo_a_result.get("board_height_mm", np.nan),
+                    algo_a_result.get("board_width_error_mm", np.nan),
+                    algo_a_result.get("board_height_error_mm", np.nan),
+                    algo_a_result.get("hole_diameters_mm"),
+                    algo_a_result.get("hole_centers_world_mm"),
                 )
             save_debug_figure(vis,
                               output_base_dir / f"{image_name}_06a_algo_a_detection.png",
@@ -351,6 +391,12 @@ def generate_report_figures(
                     algo_b_result["pitch_y_mm"],
                     algo_b_result["abs_error_x_mm"],
                     algo_b_result["abs_error_y_mm"],
+                    algo_b_result.get("board_width_mm", np.nan),
+                    algo_b_result.get("board_height_mm", np.nan),
+                    algo_b_result.get("board_width_error_mm", np.nan),
+                    algo_b_result.get("board_height_error_mm", np.nan),
+                    algo_b_result.get("hole_diameters_mm"),
+                    algo_b_result.get("hole_centers_world_mm"),
                 )
             save_debug_figure(vis,
                               output_base_dir / f"{image_name}_06b_algo_b_detection.png",

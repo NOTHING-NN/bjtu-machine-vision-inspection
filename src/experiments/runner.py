@@ -38,6 +38,7 @@ def process_single(
     image_path: Path,
     exp_config,
     camera_params: Optional[Tuple[np.ndarray, np.ndarray]],
+    image_to_world: Optional[np.ndarray] = None,
 ) -> Dict:
     """
     按照实验配置处理单张 PCB 图像。
@@ -46,6 +47,7 @@ def process_single(
         image_path:    PCB 图像文件路径
         exp_config:    ExperimentConfig 实例
         camera_params: (camera_matrix, dist_coeffs) 或 (None, None)
+        image_to_world: 去畸变图像像素到测量平面毫米坐标的单应性
 
     Returns:
         包含测量结果和中间产物的 dict
@@ -130,7 +132,7 @@ def process_single(
     hole_result = detect_all_holes(warped_gray, board_size_px, warped_color)
 
     # ---- 几何测量 ----
-    measurement = run_measurement(hole_result, board_size_px)
+    measurement = run_measurement(board_result, hole_result, image_to_world)
 
     remark_parts = []
     if not hole_result.success:
@@ -203,6 +205,37 @@ def _failure_result(image_name: str, sample_type: str, method: str,
         "rel_error_y_pct": np.nan,
         "mean_pitch_mm": np.nan,
         "mean_abs_error_mm": np.nan,
+        "board_width_top_mm": np.nan,
+        "board_width_bottom_mm": np.nan,
+        "board_height_left_mm": np.nan,
+        "board_height_right_mm": np.nan,
+        "board_width_mm": np.nan,
+        "board_height_mm": np.nan,
+        "board_width_error_mm": np.nan,
+        "board_height_error_mm": np.nan,
+        "resolution_x_mm_per_px": np.nan,
+        "resolution_y_mm_per_px": np.nan,
+        "resolution_mean_mm_per_px": np.nan,
+        "resolution_x_px_per_mm": np.nan,
+        "resolution_y_px_per_mm": np.nan,
+        "resolution_mean_px_per_mm": np.nan,
+        "resolution_mean_um_per_px": np.nan,
+        "hole_diameters_mm": [np.nan] * 4,
+        "hole_centers_world_mm": [(np.nan, np.nan)] * 4,
+        "hole1_x_mm": np.nan,
+        "hole1_y_mm": np.nan,
+        "hole1_diameter_mm": np.nan,
+        "hole2_x_mm": np.nan,
+        "hole2_y_mm": np.nan,
+        "hole2_diameter_mm": np.nan,
+        "hole3_x_mm": np.nan,
+        "hole3_y_mm": np.nan,
+        "hole3_diameter_mm": np.nan,
+        "hole4_x_mm": np.nan,
+        "hole4_y_mm": np.nan,
+        "hole4_diameter_mm": np.nan,
+        "measurement_valid": False,
+        "measurement_message": message,
         "remark": remark,
         "board_score": None,
         "num_components_before": num_components_before,
@@ -225,6 +258,7 @@ def run_experiment(
     exp_config,
     image_paths: List[Path],
     camera_params: Optional[Tuple[np.ndarray, np.ndarray]],
+    image_to_world: Optional[np.ndarray] = None,
 ) -> List[Dict]:
     """
     按指定配置批量运行实验。
@@ -233,6 +267,7 @@ def run_experiment(
         exp_config:    ExperimentConfig 实例
         image_paths:   PCB 图像路径列表
         camera_params: 标定参数
+        image_to_world: 去畸变图像像素到测量平面毫米坐标的单应性
 
     Returns:
         所有图像的处理结果列表
@@ -247,7 +282,7 @@ def run_experiment(
     results = []
     for i, path in enumerate(image_paths):
         print(f"\n  [{i+1}/{len(image_paths)}] {path.name}")
-        result = process_single(path, exp_config, camera_params)
+        result = process_single(path, exp_config, camera_params, image_to_world)
         if result is not None:
             results.append(result)
 
@@ -263,10 +298,23 @@ def save_results_csv(results: List[Dict], output_path: Path) -> pd.DataFrame:
     csv_fields = [
         "image_name", "sample_type", "method",
         "board_detect_success", "holes_detect_success", "num_holes",
+        "measurement_valid", "measurement_message",
+        "board_width_mm", "board_height_mm",
+        "board_width_error_mm", "board_height_error_mm",
+        "resolution_x_mm_per_px", "resolution_y_mm_per_px",
+        "resolution_mean_mm_per_px",
+        "resolution_x_px_per_mm", "resolution_y_px_per_mm",
+        "resolution_mean_px_per_mm", "resolution_mean_um_per_px",
+        "board_width_top_mm", "board_width_bottom_mm",
+        "board_height_left_mm", "board_height_right_mm",
         "pitch_x_mm", "pitch_y_mm",
         "abs_error_x_mm", "abs_error_y_mm",
         "rel_error_x_pct", "rel_error_y_pct",
         "mean_pitch_mm", "mean_abs_error_mm",
+        "hole1_x_mm", "hole1_y_mm", "hole1_diameter_mm",
+        "hole2_x_mm", "hole2_y_mm", "hole2_diameter_mm",
+        "hole3_x_mm", "hole3_y_mm", "hole3_diameter_mm",
+        "hole4_x_mm", "hole4_y_mm", "hole4_diameter_mm",
         "board_score",
         "separation_applied", "separation_modified",
         "quad_recovery_used",

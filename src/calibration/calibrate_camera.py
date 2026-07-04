@@ -199,6 +199,8 @@ def run_calibration() -> None:
 
     if success:
         save_camera_params(mtx, dist)
+        from src.calibration.measurement_plane import create_measurement_plane_homography
+        create_measurement_plane_homography((mtx, dist))
         print("\n[INFO] 相机标定流程完成 [OK]")
     else:
         print("\n[ERROR] 相机标定流程失败 [FAIL]")

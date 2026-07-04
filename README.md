@@ -1,94 +1,116 @@
-# PCB 二维自动测量 — 面向非均匀光照与局部强反光条件的稳定性研究
+# PCB 二维图像测量系统
 
-## 项目目标
+本项目实现一个面向 PCB 电路板的二维图像测量系统，研究在非均匀光照和局部强反光条件下，常规测量流程与强光斑感知改进流程的检测稳定性。系统先使用 A4 打印黑白棋盘格完成相机标定和测量平面毫米坐标标定，棋盘格单格边长为 `10 mm`；随后对同一块 PCB 的多张图像进行外框检测、四角点定位、透视矫正、安装孔定位、孔距与孔径计算、板长宽测量和误差统计。
 
-在非均匀光照和局部强反光条件下，研究 PCB 电路板二维自动测量流程的**稳定性**。核心问题不是单纯"精度更高"，而是：
+PCB 标称外框尺寸为 `100 mm × 100 mm`，四个安装孔中心距标称值为 `94 mm × 94 mm`，用于最终误差评价。实际尺寸测量的毫米坐标由棋盘格测量平面单应性提供。
 
-- **算法 A (基础测量)** 在正常样本可工作，但在强光斑邻接条件下会因 mask 粘连而失效
-- **算法 B (强光斑感知改进)** 通过高光分析与连通域约束，将 PCB 区域从反光干扰中分离
-- **关键设计原则：算法 B 只改进 PCB mask 与区域分离，不改变后续测量链路**（外框检测、透视矫正、孔检测、尺寸计算方法完全一致），确保对比实验结论不受"测量算法也变了"干扰
+## 研究内容
 
-## 测量对象与已知参数
+项目将待测 PCB 图像分为两类：
 
-| 参数 | 标称值 |
-|------|--------|
-| 电路板外框尺寸 | 100 mm × 100 mm |
-| 安装孔中心间距 | 94 mm × 94 mm |
-| 安装孔距板边 | 约 3 mm |
-| 棋盘格单格边长 | 10 mm |
-| PCB 待测图像数量 | 6 张（同一对象多次采集） |
+| 类型 | 样本 | 光照特征 | 实验作用 |
+|------|------|----------|----------|
+| A 类 | 01, 02, 03, 04 | PCB 板面存在局部反光，但背景强光斑干扰较轻 | 验证基础测量流程在常规条件下的可用性 |
+| B 类 | 05, 06 | 强光斑紧贴 PCB 边缘，容易与 PCB 区域粘连 | 验证强光斑感知改进算法的恢复能力 |
 
-> ⚠️ **重要**：电路板外框 (100×100 mm) 用作透视矫正的尺度基准，**不作为独立验证指标**。94×94 mm 安装孔中心距用作独立验证指标。
+实验设计包含两条算法路线：
 
-## 样本分类
+| 算法 | 运行范围 | 作用 |
+|------|----------|------|
+| 算法 A | 全部样本 | 基础测量流程，用于建立常规方法的性能边界 |
+| 算法 B | B 类样本 | 强光斑感知改进流程，用于恢复强光斑邻接条件下的外框检测和端到端测量 |
 
-根据光照干扰特征，待测样本分为两类：
+算法 B 重点改进 PCB mask 生成、强光斑粘连处理和四边形恢复，后续孔检测与几何测量链路与算法 A 保持一致。
 
-| 类型 | 标签 | 样本 | 特征 | 评价重点 |
-|------|------|------|------|----------|
-| A | 正常/轻反光 | 01, 02, 03, 04 | PCB 本身局部发亮，背景光斑不严重 | 测量误差、精度保持 |
-| B | 强光斑邻接 | 05, 06 | 巨大光斑紧贴 PCB，易导致 mask 粘连 | 板检测成功率、区域分离能力 |
+## 测量流程
 
-## 算法说明
+### 标定流程
 
-### 算法 A：基础测量算法
-
-```
-畸变校正 → HSV PCB mask → 连通域候选筛选 → 四角点定位 → 透视矫正 → 孔检测 → 尺寸测量
+```text
+棋盘格图像
+  → 灰度化
+  → 棋盘格角点检测
+  → 亚像素角点优化
+  → 相机内参和畸变系数估计
+  → 测量平面 image pixel → world mm 单应性估计
 ```
 
-采用常规图像处理流程：畸变校正、HSV 绿色区域分割、连通域候选筛选、透视矫正和安装孔检测。
+标定输出：
 
-### 算法 B：强光斑感知改进算法
+| 文件 | 说明 |
+|------|------|
+| `outputs/calibration/camera_params.npz` | 相机内参和畸变系数 |
+| `outputs/calibration/measurement_plane_homography.npz` | 图像像素到测量平面毫米坐标的单应性 |
+| `outputs/calibration/corners_*.png` | 棋盘格角点检测可视化 |
+| `outputs/calibration/measurement_plane_reference.png` | 测量平面参考图 |
 
+### 算法 A：基础测量
+
+```text
+PCB 图像
+  → 畸变校正
+  → HSV 绿色区域分割
+  → 连通域候选筛选与打分
+  → PCB 四边形外框检测
+  → 透视矫正
+  → 俯视图四孔检测
+  → 原图/俯视图坐标回映射
+  → 测量平面毫米坐标计算
+  → 板长宽、孔心、孔径、孔距和误差统计
 ```
-畸变校正 → HSV PCB mask → 高光区域检测 → 光斑/PCB 粘连区域分离 → 连通域候选筛选 → 后续测量流程同算法 A
+
+### 算法 B：强光斑感知改进
+
+```text
+PCB 图像
+  → 畸变校正
+  → 高光区域检测
+  → HSV 绿色区域分割
+  → 高光引导的 mask 区域分离
+  → 常规候选四边形检测
+  → row-interval 四边形恢复
+  → 后续孔检测与几何测量
 ```
 
-在保持后续测量流程完全一致的前提下，引入高光区域检测与光斑-PCB 区域分离模块：
+算法 B 的核心是处理强光斑与 PCB 区域在二值 mask 中粘连的问题。当常规连通域候选无法形成合法四边形时，`quad_recovery.py` 通过逐行扫描前景区间、拟合左右边界并恢复四边形外框，使后续测量流程能够继续执行。
 
-1. **高光检测**：检测 V 高 + S 低的白色反光区域
-2. **区域分离**：对 B 类样本，利用高光 mask 引导切除 green_mask 中与反光粘连的区域
-3. **安全回退**：区域分离后若无合法候选，自动回退到原始 mask
+## 核心算法模块
+
+| 模块 | 文件 | 说明 |
+|------|------|------|
+| 相机标定 | `src/calibration/calibrate_camera.py` | 棋盘格角点检测、相机内参和畸变系数估计 |
+| 测量平面标定 | `src/calibration/measurement_plane.py` | 建立图像像素到毫米坐标的平面单应性 |
+| 标准预处理 | `src/preprocessing/baseline.py` | 畸变校正、灰度化、滤波等基础处理 |
+| 高光处理 | `src/preprocessing/highlight.py` | 高光区域检测和强光区域辅助处理 |
+| mask 生成 | `src/preprocessing/masks.py` | PCB 绿色区域分割、高光 mask 后处理 |
+| 外框检测 | `src/board_detection/board_detector.py` | PCB 四边形候选选择、角点排序、透视矫正 |
+| 候选筛选 | `src/board_detection/candidate_filter.py` | 连通域面积、宽高比、边界和位置约束 |
+| 区域分离 | `src/board_detection/region_separation.py` | 强光斑与 PCB mask 粘连分离 |
+| 四边形恢复 | `src/board_detection/quad_recovery.py` | 从残损 mask 中恢复 PCB 四边形外框 |
+| 孔检测 | `src/measurement/hole_detector.py` | 俯视图中检测四个圆形安装孔 |
+| 几何测量 | `src/measurement/geometry.py` | 板长宽、孔心、孔径、孔距和误差计算 |
+| 实验执行 | `src/experiments/runner.py` | 批量运行算法 A/B 并输出 CSV |
+| 统计报告 | `src/experiments/statistics.py` | 检测成功率、误差统计、分组报告 |
+| 可视化报告 | `src/experiments/report.py` | mask、候选、检测叠加图输出 |
 
 ## 项目结构
 
-```
+```text
 pcb_measurement_project/
 ├── data/
-│   ├── pcb/                  # PCB 待测图像（.bmp / .jpg / .png）
-│   └── calibration/          # 棋盘格标定图像
+│   ├── calibration/          # 棋盘格标定图像
+│   └── pcb/                  # PCB 待测图像
 ├── src/
-│   ├── config.py             # 所有可调参数集中管理
-│   ├── utils.py              # 通用工具函数 (图像 I/O, DetectionResult)
-│   ├── calibration/          # 层1: 相机标定
-│   │   └── calibrate_camera.py
-│   ├── preprocessing/        # 层2: 可替换预处理策略
-│   │   ├── baseline.py       #   标准预处理 (算法 A)
-│   │   ├── masks.py          #   PCB 绿色 mask、高光 mask、mask 后处理
-│   │   ├── highlight.py      #   高光检测与抑制
-│   │   └── illumination.py   #   光照场估计、暗区提升
-│   ├── board_detection/      # 层3: PCB 外框检测
-│   │   ├── board_detector.py     # 主检测入口
-│   │   ├── candidate_filter.py   # 候选连通域筛选与打分
-│   │   ├── region_separation.py  # 光斑与 PCB 粘连分离
-│   │   ├── quad_recovery.py      # row-interval 四边形恢复（核心创新）
-│   │   └── perspective.py        # 角点排序、单应性、透视变换
-│   ├── measurement/          # 层4: 几何测量
-│   │   ├── hole_detector.py  # 俯视图 ROI 孔检测
-│   │   └── geometry.py       # 孔距/误差计算、汇总统计
-│   └── experiments/          # 层5: 实验与报告
-│       ├── configs.py        # ExperimentConfig + 预设配置
-│       ├── runner.py         # 统一实验执行引擎
-│       ├── statistics.py     # 统计指标与三类对比报告
-│       └── report.py         # 可视化与报告图生成
+│   ├── calibration/          # 相机标定与测量平面标定
+│   ├── preprocessing/        # 标准预处理、高光检测、mask 生成
+│   ├── board_detection/      # 外框检测、区域分离、四边形恢复
+│   ├── measurement/          # 安装孔检测与几何测量
+│   └── experiments/          # 实验配置、执行、统计和报告
 ├── outputs/
-│   ├── calibration/          # 标定参数与角点可视化
-│   ├── experiments/          # 算法中间结果
-│   │   ├── algorithm_a/
-│   │   └── algorithm_b/
-│   └── reports/              # 对比实验 CSV 与报告图
-├── main.py                   # 命令行入口
+│   ├── calibration/          # 标定输出
+│   ├── experiments/          # 中间实验结果
+│   └── reports/              # CSV 和报告图
+├── main.py
 ├── requirements.txt
 └── README.md
 ```
@@ -99,104 +121,137 @@ pcb_measurement_project/
 pip install -r requirements.txt
 ```
 
-依赖：
+主要依赖：
+
 - `opencv-python >= 4.8.0`
 - `numpy >= 1.24.0`
 - `pandas >= 2.0.0`
 - `matplotlib >= 3.7.0`
 
-## 使用步骤
+## 使用方法
 
 ### 1. 放置数据
 
-将图像文件放入对应目录：
-
-```
-data/pcb/           ← PCB 电路板图像 (01.bmp, 02.bmp, …, 06.bmp)
-data/calibration/   ← 棋盘格标定图像 (01.bmp, 02.bmp, …)
+```text
+data/calibration/   # 棋盘格标定图像，例如 01.bmp, 02.bmp ...
+data/pcb/           # PCB 待测图像，例如 01.bmp ... 06.bmp
 ```
 
-支持的图像格式：`.bmp`, `.jpg`, `.jpeg`, `.png`, `.tif`, `.tiff`
+### 2. 检查配置
 
-### 2. 修改配置参数
+主要配置位于 `src/config.py`：
 
-编辑 `src/config.py`，根据实际情况修改：
+| 参数 | 说明 |
+|------|------|
+| `CHESSBOARD_PATTERN_SIZE` | 棋盘格内角点数量，当前为 `(10, 10)` |
+| `SQUARE_SIZE_MM` | 棋盘格单格边长，当前为 `10.0` |
+| `BOARD_WIDTH_MM`, `BOARD_HEIGHT_MM` | PCB 外框标称尺寸，用于误差统计 |
+| `HOLE_PITCH_X_MM`, `HOLE_PITCH_Y_MM` | 安装孔中心距标称值，用于误差统计 |
 
-- **`CHESSBOARD_PATTERN_SIZE`** — 必须修改！设置为棋盘格的**内角点**数量（不是棋盘格方块数）。
-  - 例如：打印了 10×7 的棋盘格 → 内角点为 9×6 → 写 `(9, 6)`
-- **`SAMPLE_TYPE_MAP`**（在 `src/experiments/configs.py`）— 按实际样本情况修改光照类型分类
-- 其他参数可使用默认值，后续可根据实验结果微调
+样本类型配置位于 `src/experiments/configs.py` 的 `SAMPLE_TYPE_MAP`。
 
-### 3. 相机标定
+### 3. 相机与测量平面标定
 
 ```bash
 python main.py calibrate
 ```
 
-输出：
-- `outputs/calibration/camera_params.npz` — 相机内参与畸变系数
-- `outputs/calibration/corners_*.png` — 每张标定图的角点检测可视化
+该命令会生成相机参数和测量平面单应性。
 
-### 4. 运行对比实验
+### 4. 运行完整实验
 
 ```bash
 python main.py compare
 ```
 
-该命令自动：
-1. 加载相机标定参数
-2. **算法 A** 在全部样本上运行；**算法 B** 仅在 B 类（强光斑邻接）样本上运行
-3. 两组算法的后续检测流程（board → holes → measure）完全一致
-4. 按样本类型 (A/B) 分组统计，输出两类对比报告到 `outputs/reports/`
+该命令会：
 
-### 5. 单独运行实验（调试用）
+1. 运行算法 A 处理全部 PCB 图像；
+2. 运行算法 B 处理 B 类强光斑邻接样本；
+3. 生成测量 CSV、分组统计报告和可视化报告图。
+
+### 5. 单独运行算法
 
 ```bash
-python main.py algorithm-a       # 算法 A — 全部样本
-python main.py algorithm-b       # 算法 B — 仅 B 类样本
+python main.py algorithm-a
+python main.py algorithm-b
 ```
 
-## 输出说明
+## 输出结果
 
-对比实验完成后，`outputs/reports/` 目录下包含：
+`outputs/reports/` 中包含：
 
-| 文件 | 说明 |
+| 文件/目录 | 说明 |
+|-----------|------|
+| `measurements_algorithm_a.csv` | 算法 A 逐图测量结果 |
+| `measurements_algorithm_b.csv` | 算法 B 逐图测量结果 |
+| `comparison_summary.csv` | B 类样本上的统计对比 |
+| `01/` ... `06/` | 每张图像的原图、mask、候选、检测叠加和测量图 |
+
+CSV 主要字段：
+
+| 字段 | 说明 |
 |------|------|
-| `measurements_algorithm_a.csv` | 算法 A 测量结果（含 sample_type、分离前后连通域数等） |
-| `measurements_algorithm_b.csv` | 算法 B 测量结果 |
-| `comparison_summary.csv` | 两组统计对比表 |
-| `<图像名>/` | 每张图像的报告图子目录 |
+| `board_width_mm`, `board_height_mm` | 电路板外框实测长宽 |
+| `board_width_error_mm`, `board_height_error_mm` | 板长宽误差 |
+| `resolution_*_mm_per_px` | 测量图像空间分辨率，单位 mm/px |
+| `resolution_*_px_per_mm` | 测量图像采样密度，单位 px/mm |
+| `resolution_mean_um_per_px` | 平均分辨率，单位 um/px |
+| `hole*_x_mm`, `hole*_y_mm` | 四个安装孔圆心毫米坐标 |
+| `hole*_diameter_mm` | 四个安装孔直径 |
+| `pitch_x_mm`, `pitch_y_mm` | X/Y 方向孔中心距 |
+| `abs_error_x_mm`, `abs_error_y_mm` | X/Y 方向孔距误差 |
+| `mean_abs_error_mm` | X/Y 平均绝对误差 |
+| `num_components_before`, `num_components_after` | 区域分离前后连通域数量 |
+| `quad_recovery_used` | 是否使用四边形恢复 |
 
-### 统计报告
+## 当前实验结果
 
-对比实验输出两类结构化报告：
+当前 6 张 PCB 图像的实验结果如下：
 
-1. **算法 A 在 A/B 两类样本上的运行结果**
-   — 说明强光斑邻接会导致常规流程失效（A 类全成功，B 类全失败）
+| 分组 | 算法 | 板检测 | 孔检测 | 平均孔距误差 |
+|------|------|--------|--------|--------------|
+| A 类 01-04 | 算法 A | 4/4 | 4/4 | `1.9465 mm ± 0.7815 mm` |
+| B 类 05-06 | 算法 A | 0/2 | 0/2 | N/A |
+| B 类 05-06 | 算法 B | 2/2 | 2/2 | `1.2017 mm ± 0.5935 mm` |
 
-2. **算法 A 与算法 B 在 B 类样本上的对比**
-   — 核心对比：区域分离 + 四边形恢复能否将 B 类从"完全无法测量"恢复为"端到端可测量"
-   — 含分离前后连通域变化、四边形恢复触发情况
+B 类逐图结果：
 
-### 统计指标
+| 图像 | 算法 | 板长 | 板宽 | X 孔距 | Y 孔距 | 平均孔距误差 |
+|------|------|------|------|--------|--------|--------------|
+| 05 | 算法 B | `99.80 mm` | `101.33 mm` | `91.29 mm` | `94.54 mm` | `1.6213 mm` |
+| 06 | 算法 B | `101.12 mm` | `101.33 mm` | `93.81 mm` | `92.63 mm` | `0.7820 mm` |
 
-| 指标 | 说明 |
+## 测量分辨率
+
+系统在完成 PCB 外框检测和测量平面坐标转换后，根据外框实测尺寸与透视矫正图像尺寸计算当前测量分辨率：
+
+```text
+resolution_x_mm_per_px = board_width_mm / warped_width_px
+resolution_y_mm_per_px = board_height_mm / warped_height_px
+resolution_mean_mm_per_px = 平均(X, Y)
+resolution_mean_px_per_mm = 1 / resolution_mean_mm_per_px
+```
+
+该指标用于描述当前实验条件下图像测量的空间采样能力，并随每张图像一起写入 CSV。
+
+## 报告图建议
+
+用于展示问题驱动和改进效果时，推荐使用以下图像：
+
+| 图像 | 作用 |
 |------|------|
-| 板检测成功率 | 外框四边形成功定位的比例 |
-| 四角点定位成功率 | 四角点正确排序的比例 |
-| 孔检测成功率 | 四个安装孔全部检测成功的比例 |
-| X/Y 孔距误差 | 与标称值 94.0 mm 的绝对偏差 |
-| 平均绝对误差 | X/Y 两方向误差的均值 |
-| 重复性标准差 | 多张图像测量结果的离散度 |
-| 强光斑分离是否生效 | 区域分离模块是否实际触发 |
-| 分离前/后连通域数量 | 区域分离前后 mask 连通域变化 |
-| 候选区域面积、宽高比、位置评分 | 候选筛选器行为分析 |
+| `outputs/reports/05/05_01_original.png` | B 类强光斑原图 |
+| `outputs/reports/05/05_02_algo_a_mask.png` | 算法 A mask 失败现象 |
+| `outputs/reports/05/05_02b_algo_a_largest_component.png` | 强光斑与 PCB 共同形成连通域 |
+| `outputs/reports/05/05_04b_algo_b_candidates.png` | 算法 B 四边形恢复候选 |
+| `outputs/reports/05/05_06b_algo_b_detection.png` | 算法 B 最终检测与测量叠加图 |
 
-## 注意事项
+06 样本同理。
 
-1. 电路板外框用作透视矫正基准，94 mm 孔间距用作独立验证指标。
-2. 棋盘格标定板为 A4 纸打印，单格 10 mm，标定阶段不引入光照矫正。
-3. 检测失败时程序不会崩溃，在 CSV 中记录失败原因，精确到失败阶段。
-4. 所有参数集中在 `src/config.py`，调整参数无需修改算法代码。
-5. 预处理输出多种中间结果（mask、光照场、高光 mask），后续检测模块可选择使用。
-6. 算法 B 仅改变 mask 生成与区域分离，后续测量链路与算法 A 完全一致。
+## 研究结论
+
+1. 基础测量流程在 A 类样本上能够稳定完成 PCB 外框检测、安装孔检测和尺寸测量。
+2. B 类样本中，强光斑邻接会导致 PCB mask 与背景强光区域形成粘连连通域，使常规候选筛选无法得到合法外框。
+3. 算法 B 通过高光感知区域分离和 row-interval 四边形恢复，使 B 类样本从外框检测失败恢复为端到端可测量。
+4. 棋盘格测量平面标定为板长宽、孔心、孔径和孔距提供统一毫米坐标，便于输出完整尺寸测量结果和误差统计。

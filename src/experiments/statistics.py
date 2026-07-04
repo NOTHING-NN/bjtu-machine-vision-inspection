@@ -89,10 +89,18 @@ def compute_error_statistics(results: List[Dict]) -> Dict:
         return {"n_valid": 0}
 
     keys = [
+        "board_width_mm", "board_height_mm",
+        "board_width_error_mm", "board_height_error_mm",
+        "resolution_x_mm_per_px", "resolution_y_mm_per_px",
+        "resolution_mean_mm_per_px",
+        "resolution_x_px_per_mm", "resolution_y_px_per_mm",
+        "resolution_mean_px_per_mm", "resolution_mean_um_per_px",
         "pitch_x_mm", "pitch_y_mm",
         "abs_error_x_mm", "abs_error_y_mm",
         "mean_abs_error_mm",
     ]
+    for i in range(1, 5):
+        keys.append(f"hole{i}_diameter_mm")
 
     stats = {"n_valid": len(valid)}
     for key in keys:
@@ -271,10 +279,10 @@ def format_statistics_table(
         if s.get("n_valid", 0) > 0:
             lines.append(f"  平均孔距误差:  {_fmt_mm(s.get('mean_abs_error_mm_mean', np.nan))}"
                          f" ± {_fmt_mm(s.get('mean_abs_error_mm_std', np.nan))}")
-            lines.append(f"  X 方向误差:    {_fmt_mm(s.get('abs_error_x_mean', np.nan))}"
-                         f" ± {_fmt_mm(s.get('abs_error_x_std', np.nan))}")
-            lines.append(f"  Y 方向误差:    {_fmt_mm(s.get('abs_error_y_mean', np.nan))}"
-                         f" ± {_fmt_mm(s.get('abs_error_y_std', np.nan))}")
+            lines.append(f"  X 方向误差:    {_fmt_mm(s.get('abs_error_x_mm_mean', np.nan))}"
+                         f" ± {_fmt_mm(s.get('abs_error_x_mm_std', np.nan))}")
+            lines.append(f"  Y 方向误差:    {_fmt_mm(s.get('abs_error_y_mm_mean', np.nan))}"
+                         f" ± {_fmt_mm(s.get('abs_error_y_mm_std', np.nan))}")
 
     # ─── 类别 2：算法 A vs 算法 B 在 B 类样本上的对比 ───
     lines.append(_print_section_header(
@@ -332,6 +340,84 @@ def format_statistics_table(
             name = r.get("image_name", "?")
             err = r.get("mean_abs_error_mm", np.nan)
             lines.append(f"    {name}: 孔距误差={_fmt_mm(err)}")
+
+    # ─── 类别 3：板尺寸测量 ───
+    board_methods = [
+        (key_a_b, "算法 A", stats_a),
+        (key_b_b, "算法 B", stats_b),
+    ]
+    board_has_data = any(
+        s and s.get("n_valid", 0) > 0
+        for _, _, s in board_methods if s
+    )
+    if board_has_data:
+        lines.append(_print_section_header("3. 电路板长宽测量"))
+        lines.append("  说明：尺度来自棋盘格测量平面，独立于板 100mm 标称值。")
+        for key, label, stats in board_methods:
+            if stats is None:
+                continue
+            s = stats
+            if s.get("n_valid", 0) == 0:
+                lines.append(f"\n  {label}: (无有效数据)")
+                continue
+            lines.append(_print_sub_header(label))
+            lines.append(f"  板宽 (W):  {_fmt_mm(s.get('board_width_mm_mean', np.nan))}"
+                         f" ± {_fmt_mm(s.get('board_width_mm_std', np.nan))}"
+                         f"  误差: {_fmt_mm(s.get('board_width_error_mm_mean', np.nan))}")
+            lines.append(f"  板高 (H):  {_fmt_mm(s.get('board_height_mm_mean', np.nan))}"
+                         f" ± {_fmt_mm(s.get('board_height_mm_std', np.nan))}"
+                         f"  误差: {_fmt_mm(s.get('board_height_error_mm_mean', np.nan))}")
+
+    # ─── 类别 4：测量分辨率 ───
+    resolution_has_data = any(
+        s and s.get("n_valid", 0) > 0
+        and not np.isnan(s.get("resolution_mean_mm_per_px_mean", np.nan))
+        for _, _, s in board_methods if s
+    )
+    if resolution_has_data:
+        lines.append(_print_section_header("4. 测量分辨率"))
+        lines.append("  说明：由测量平面下的外框实测尺寸 / 俯视图像素尺寸计算。")
+        for key, label, stats in board_methods:
+            if stats is None or stats.get("n_valid", 0) == 0:
+                continue
+            s = stats
+            lines.append(_print_sub_header(label))
+            lines.append(
+                f"  X 分辨率: {_fmt_mm(s.get('resolution_x_mm_per_px_mean', np.nan))}/px"
+                f" ± {_fmt_mm(s.get('resolution_x_mm_per_px_std', np.nan))}/px"
+            )
+            lines.append(
+                f"  Y 分辨率: {_fmt_mm(s.get('resolution_y_mm_per_px_mean', np.nan))}/px"
+                f" ± {_fmt_mm(s.get('resolution_y_mm_per_px_std', np.nan))}/px"
+            )
+            lines.append(
+                f"  平均分辨率: {_fmt_mm(s.get('resolution_mean_mm_per_px_mean', np.nan))}/px"
+                f"  ({s.get('resolution_mean_um_per_px_mean', np.nan):.2f} um/px)"
+            )
+            lines.append(
+                f"  平均采样密度: {s.get('resolution_mean_px_per_mm_mean', np.nan):.2f} px/mm"
+            )
+
+    # ─── 类别 5：安装孔直径 ───
+    hole_dia_keys = [f"hole{i}_diameter_mm" for i in range(1, 5)]
+    hole_dia_has_data = any(
+        s and s.get("n_valid", 0) > 0
+        and any(not np.isnan(s.get(f"{k}_mean", np.nan)) for k in hole_dia_keys)
+        for _, _, s in board_methods if s
+    )
+    if hole_dia_has_data:
+        lines.append(_print_section_header("5. 安装孔直径"))
+        lines.append("  说明：圆轮廓采样 → 反投影 → 测量平面 mm 坐标 → 直径。")
+        for key, label, stats in board_methods:
+            if stats is None or stats.get("n_valid", 0) == 0:
+                continue
+            s = stats
+            lines.append(_print_sub_header(label))
+            for k in hole_dia_keys:
+                v_mean = s.get(f"{k}_mean", np.nan)
+                v_std = s.get(f"{k}_std", np.nan)
+                if not np.isnan(v_mean):
+                    lines.append(f"  {k.replace('_', ' ')}: {_fmt_mm(v_mean)} ± {_fmt_mm(v_std)}")
 
     # 汇总
     lines.append(_print_section_header("汇总"))

@@ -28,6 +28,10 @@ CALIB_OUTPUT_DIR = OUTPUT_DIR / "calibration"
 EXPERIMENTS_OUTPUT_DIR = OUTPUT_DIR / "experiments"
 REPORTS_OUTPUT_DIR = OUTPUT_DIR / "reports"
 
+# 由棋盘格 10 mm 单格建立的测量平面单应性。
+# 它是本项目唯一允许用于像素-mm换算的尺度来源。
+MEASUREMENT_PLANE_HOMOGRAPHY_FILE = CALIB_OUTPUT_DIR / "measurement_plane_homography.npz"
+
 # ============================================================
 # 2. 标定参数
 # ============================================================
@@ -43,7 +47,7 @@ SUBPIX_MAX_ITER = 30
 SUBPIX_EPSILON = 0.001
 
 # ============================================================
-# 3. 电路板尺寸参数（标称值）
+# 3. 电路板尺寸参数（仅用于误差评价，禁止用于检测或尺度换算）
 # ============================================================
 
 # 电路板外框尺寸，单位 mm
@@ -54,15 +58,8 @@ BOARD_HEIGHT_MM = 100.0
 HOLE_PITCH_X_MM = 94.0
 HOLE_PITCH_Y_MM = 94.0
 
-# 安装孔理论中心坐标（相对于电路板左上角），单位 mm
-# 孔心距板边 3 mm
-HOLE_OFFSET_MM = 3.0
-EXPECTED_HOLE_POSITIONS_MM = [
-    (HOLE_OFFSET_MM, HOLE_OFFSET_MM),                          # 左上
-    (BOARD_WIDTH_MM - HOLE_OFFSET_MM, HOLE_OFFSET_MM),         # 右上
-    (BOARD_WIDTH_MM - HOLE_OFFSET_MM, BOARD_HEIGHT_MM - HOLE_OFFSET_MM),  # 右下
-    (HOLE_OFFSET_MM, BOARD_HEIGHT_MM - HOLE_OFFSET_MM),        # 左下
-]
+# 注意：不要在检测和测量换算中使用 BOARD_WIDTH_MM / BOARD_HEIGHT_MM /
+# HOLE_PITCH_X_MM / HOLE_PITCH_Y_MM。它们只能用于最终误差统计。
 
 # ============================================================
 # 4. 预处理参数
@@ -97,10 +94,6 @@ HIGHLIGHT_SUPPRESS_FACTOR = 0.35    # 反光区 V 压制系数（越低越强力
 # --- 暗区提升（光照矫正用） ---
 SHADOW_V_MAX = 35                   # V 低于此值视为阴影，需提亮
 SHADOW_BOOST_FACTOR = 0.7           # 暗区V不低于光照场的该比例
-
-# --- ROI 参数 ---
-# 在估计的安装孔位置周围开辟 ROI 区域
-HOLE_ROI_SIZE_MM = 15.0             # ROI 半边长，单位 mm
 
 # --- HoughCircles 参数 ---
 HOUGH_DP = 1.2

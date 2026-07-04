@@ -1,46 +1,113 @@
 """
-hole_detector.py — 安装孔检测模块（俯视图版）
+hole_detector.py — 安装孔检测模块（无 PCB 尺寸先验版）
 
-在透视矫正后的俯视图中，根据理论孔位（mm）开 ROI，
-在 ROI 内用轮廓圆度 + HoughCircles 综合检测。
-
-优势：
-  - 圆心和半径天然在俯视图尺度，无需坐标映射
-  - 俯视图为 1:1 正方形，计算简单可靠
+在透视矫正后的 PCB 俯视图中检测四个圆形暗孔。不使用 PCB 标称尺寸、
+孔距、孔边距或理论孔位开 ROI。
 """
 
+from itertools import combinations
 from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
 
-from src import config
 from src.utils import DetectionResult
 
 
-def get_expected_hole_positions() -> List[Tuple[float, float]]:
-    """返回四个安装孔的理论位置（mm）。"""
-    return config.EXPECTED_HOLE_POSITIONS_MM
-
-
-def mm_to_pixel(
-    pos_mm: Tuple[float, float],
-    board_mm: Tuple[float, float],
-    board_px: Tuple[int, int],
-) -> Tuple[int, int]:
-    """将 mm 坐标转换为俯视图像素坐标。"""
-    scale_x = board_px[0] / board_mm[0]
-    scale_y = board_px[1] / board_mm[1]
-    return int(pos_mm[0] * scale_x), int(pos_mm[1] * scale_y)
-
-
 def _contour_circularity(contour: np.ndarray) -> float:
-    """轮廓圆度：4π×area/perimeter²。完美圆=1.0。"""
     area = cv2.contourArea(contour)
     peri = cv2.arcLength(contour, True)
-    if peri == 0:
+    if peri <= 0:
         return 0.0
-    return 4.0 * np.pi * area / (peri * peri)
+    return float(4.0 * np.pi * area / (peri * peri))
+
+
+def _order_holes(centers: List[Tuple[float, float]]) -> List[int]:
+    """按左上、右上、右下、左下排序，仅用于结果输出。"""
+    pts = np.asarray(centers, dtype=np.float32)
+    center = pts.mean(axis=0)
+    angles = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
+    return list(np.argsort(angles))
+
+
+def _deduplicate_candidates(candidates: List[Tuple[float, float, float, float]]) -> List[Tuple[float, float, float, float]]:
+    """合并重复圆候选。候选格式：(score, cx, cy, r)。"""
+    merged: List[Tuple[float, float, float, float]] = []
+    for cand in sorted(candidates, key=lambda x: x[0], reverse=True):
+        _, cx, cy, r = cand
+        duplicate = False
+        for _, mx, my, mr in merged:
+            if np.hypot(cx - mx, cy - my) < max(r, mr) * 0.65:
+                duplicate = True
+                break
+        if not duplicate:
+            merged.append(cand)
+    return merged
+
+
+def _select_four_holes(candidates: List[Tuple[float, float, float, float]],
+                       image_shape: Tuple[int, int]) -> List[Tuple[float, float, float, float]]:
+    """
+    从候选中选择四个圆孔。
+
+    使用安装孔的拓扑语义：四个孔分别落在板的四个象限。这里不使用已知孔距、
+    孔边距、孔径或 PCB 标称尺寸。
+    """
+    if len(candidates) < 4:
+        return candidates
+
+    h, w = image_shape[:2]
+    corners = [
+        (0.0, 0.0),
+        (float(w - 1), 0.0),
+        (float(w - 1), float(h - 1)),
+        (0.0, float(h - 1)),
+    ]
+    diag = max(float(np.hypot(w, h)), 1.0)
+    quadrant_candidates = [[] for _ in range(4)]
+
+    for cand in candidates:
+        score, cx, cy, _ = cand
+        if cx < w / 2 and cy < h / 2:
+            q = 0
+        elif cx >= w / 2 and cy < h / 2:
+            q = 1
+        elif cx >= w / 2 and cy >= h / 2:
+            q = 2
+        else:
+            q = 3
+
+        corner_dist = np.hypot(cx - corners[q][0], cy - corners[q][1])
+        corner_score = 1.0 - min(corner_dist / (diag * 0.5), 1.0)
+        combined = 0.72 * score + 0.28 * corner_score
+        quadrant_candidates[q].append((combined, cand))
+
+    selected = []
+    for q_items in quadrant_candidates:
+        if not q_items:
+            break
+        q_items.sort(key=lambda x: x[0], reverse=True)
+        selected.append(q_items[0][1])
+
+    if len(selected) == 4:
+        return selected
+
+    image_area = max(float(h * w), 1.0)
+    pool = candidates[: min(16, len(candidates))]
+    best_combo = None
+    best_score = -1.0
+
+    for combo in combinations(pool, 4):
+        pts = np.array([[c[1], c[2]] for c in combo], dtype=np.float32)
+        hull_area = abs(cv2.contourArea(cv2.convexHull(pts)))
+        spread_score = min(hull_area / (image_area * 0.45), 1.0)
+        quality_score = float(np.mean([c[0] for c in combo]))
+        score = 0.65 * quality_score + 0.35 * spread_score
+        if score > best_score:
+            best_score = score
+            best_combo = combo
+
+    return list(best_combo) if best_combo is not None else candidates[:4]
 
 
 def detect_hole_in_roi(
@@ -50,86 +117,107 @@ def detect_hole_in_roi(
     expected_center: Optional[Tuple[float, float]] = None,
 ) -> Optional[Tuple[float, float, float]]:
     """
-    在单个 ROI 灰度图中检测圆孔。
+    兼容旧接口：在 ROI 内检测最可信圆孔。
 
-    方法：CLAHE 增强 → 多源二值化 → 轮廓圆度筛选 → HoughCircles 备选。
-
-    Returns:
-        (cx, cy, r) 相对于 ROI 的圆心和半径，失败返回 None
+    expected_center 参数保留但不用于已知孔位先验，只作为旧调用兼容。
     """
-    candidates = []
-    roi_h, roi_w = roi_gray.shape[:2]
-    if expected_center is None:
-        expected_center = (roi_w / 2.0, roi_h / 2.0)
-    max_center_dist = max(np.hypot(roi_w, roi_h) * 0.5, 1.0)
+    result = _find_hole_candidates(roi_gray, min_radius, max_radius)
+    if not result:
+        return None
+    _, cx, cy, r = result[0]
+    return float(cx), float(cy), float(r)
 
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(roi_gray)
 
-    bin_sources = []
-    th = cv2.adaptiveThreshold(enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                               cv2.THRESH_BINARY, 31, 5)
-    bin_sources.append(th)
-    bin_sources.append(cv2.bitwise_not(th))
-    _, otsu = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    bin_sources.append(otsu)
-    bin_sources.append(cv2.bitwise_not(otsu))
+def _find_hole_candidates(
+    gray: np.ndarray,
+    min_radius: int,
+    max_radius: int,
+) -> List[Tuple[float, float, float, float]]:
+    candidates: List[Tuple[float, float, float, float]] = []
+    h, w = gray.shape[:2]
+    min_area = np.pi * min_radius * min_radius * 0.45
+    max_area = np.pi * max_radius * max_radius * 1.8
 
-    edges = cv2.Canny(enhanced, 30, 100)
-    bin_sources.append(cv2.dilate(edges, None, iterations=2))
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
 
-    for bin_img in bin_sources:
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        closed = cv2.morphologyEx(bin_img, cv2.MORPH_CLOSE, kernel)
+    masks = []
+    _, otsu_dark = cv2.threshold(
+        blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    )
+    masks.append(otsu_dark)
 
-        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL,
+    dark_cut = int(np.percentile(blurred, 18))
+    _, percentile_dark = cv2.threshold(
+        blurred, dark_cut, 255, cv2.THRESH_BINARY_INV
+    )
+    masks.append(percentile_dark)
+
+    adaptive_dark = cv2.adaptiveThreshold(
+        blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV, 91, 7,
+    )
+    masks.append(adaptive_dark)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    for mask in masks:
+        clean = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel, iterations=2)
+        contours, _ = cv2.findContours(clean, cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < np.pi * min_radius * min_radius * 0.3:
-                continue
-            if area > np.pi * max_radius * max_radius * 2:
+            if area < min_area or area > max_area:
                 continue
 
             circularity = _contour_circularity(cnt)
-            if circularity < 0.55:
+            if circularity < 0.52:
                 continue
 
             (cx, cy), r = cv2.minEnclosingCircle(cnt)
             if r < min_radius or r > max_radius:
                 continue
 
-            area_score = (
-                1.0 - abs(area - np.pi * r * r) / max(np.pi * r * r, 1.0)
-            )
-            center_dist = np.hypot(cx - expected_center[0], cy - expected_center[1])
-            position_score = 1.0 - min(center_dist / max_center_dist, 1.0)
+            if cx < r or cy < r or cx > w - r or cy > h - r:
+                continue
+
+            circle_area = np.pi * r * r
+            area_score = 1.0 - min(abs(area - circle_area) / max(circle_area, 1.0), 1.0)
+            circle_mask = np.zeros_like(gray, dtype=np.uint8)
+            cv2.circle(circle_mask, (int(cx), int(cy)), int(max(r * 0.8, 1)), 255, -1)
+            mean_intensity = cv2.mean(blurred, mask=circle_mask)[0]
+            dark_score = 1.0 - min(mean_intensity / 255.0, 1.0)
+            radius_score = min(r / max_radius, 1.0)
+
             score = (
-                0.40 * circularity +
-                0.35 * area_score +
-                0.25 * position_score
+                0.38 * circularity +
+                0.27 * area_score +
+                0.25 * dark_score +
+                0.10 * radius_score
             )
-            candidates.append((score, cx, cy, r))
+            candidates.append((float(score), float(cx), float(cy), float(r)))
 
     circles = cv2.HoughCircles(
-        enhanced, cv2.HOUGH_GRADIENT,
-        dp=1.2, minDist=min_radius,
-        param1=40, param2=max(10, int(max_radius / 12)),
-        minRadius=min_radius, maxRadius=max_radius,
+        blurred, cv2.HOUGH_GRADIENT,
+        dp=1.2,
+        minDist=max(min_radius * 4, 20),
+        param1=80,
+        param2=max(14, int(max_radius / 7)),
+        minRadius=min_radius,
+        maxRadius=max_radius,
     )
     if circles is not None:
-        for c in circles[0]:
-            cx, cy, r = float(c[0]), float(c[1]), float(c[2])
-            center_dist = np.hypot(cx - expected_center[0], cy - expected_center[1])
-            position_score = 1.0 - min(center_dist / max_center_dist, 1.0)
-            candidates.append((0.45 + 0.35 * position_score, cx, cy, r))
+        for cx, cy, r in circles[0]:
+            if cx < r or cy < r or cx > w - r or cy > h - r:
+                continue
+            circle_mask = np.zeros_like(gray, dtype=np.uint8)
+            cv2.circle(circle_mask, (int(cx), int(cy)), int(max(r * 0.8, 1)), 255, -1)
+            mean_intensity = cv2.mean(blurred, mask=circle_mask)[0]
+            dark_score = 1.0 - min(mean_intensity / 255.0, 1.0)
+            candidates.append((0.52 + 0.30 * dark_score, float(cx), float(cy), float(r)))
 
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    _, cx, cy, r = candidates[0]
-    return float(cx), float(cy), float(r)
+    return _deduplicate_candidates(candidates)
 
 
 def detect_all_holes(
@@ -138,87 +226,61 @@ def detect_all_holes(
     warped_color: np.ndarray = None,
 ) -> DetectionResult:
     """
-    在透视矫正后的俯视图中检测四个安装孔。
+    在俯视 PCB 图像中检测四个安装孔。
 
-    Args:
-        warped_gray:   俯视灰度图
-        board_size_px: 俯视图尺寸 (w, h)
-        warped_color:  俯视彩色图（可视化用）
-
-    Returns:
-        DetectionResult:
-            data["hole_centers_px"]:    四个孔心俯视图像素坐标
-            data["hole_radii_px"]:      四个孔半径（俯视图像素）
-            data["individual_success"]:  [bool, bool, bool, bool]
-            data["visualization"]:      叠加检测结果的图
-            data["expected_positions_px"]: 理论孔心像素位置
+    board_size_px 只用于相对半径范围估计，不含任何 PCB 真实尺寸信息。
     """
     if warped_gray is None:
         return DetectionResult(success=False, message="俯视图为空")
 
     h, w = warped_gray.shape[:2]
+    min_dim = max(1, min(w, h))
+    min_r = max(6, int(min_dim * 0.006))
+    max_r = max(min_r + 2, int(min_dim * 0.045))
 
-    board_mm = (config.BOARD_WIDTH_MM, config.BOARD_HEIGHT_MM)
-    expected_positions_px = [
-        mm_to_pixel(pos, board_mm, board_size_px)
-        for pos in get_expected_hole_positions()
-    ]
-
-    scale = (board_size_px[0] / board_mm[0] + board_size_px[1] / board_mm[1]) / 2.0
-    roi_half = int(config.HOLE_ROI_SIZE_MM * scale)
-
-    min_r = max(8, int(0.5 * scale))
-    max_r = min(int(w / 6), int(3.0 * scale))
-
-    hole_centers = []
-    hole_radii = []
-    individual_success = []
+    candidates = _find_hole_candidates(warped_gray, min_r, max_r)
+    selected = _select_four_holes(candidates, (h, w))
 
     vis = warped_color.copy() if warped_color is not None \
         else cv2.cvtColor(warped_gray, cv2.COLOR_GRAY2BGR)
 
-    for i, (ex, ey) in enumerate(expected_positions_px):
-        x1 = max(0, ex - roi_half)
-        y1 = max(0, ey - roi_half)
-        x2 = min(w, ex + roi_half)
-        y2 = min(h, ey + roi_half)
-        roi_gray = warped_gray[y1:y2, x1:x2]
+    if len(selected) < 4:
+        for _, cx, cy, r in candidates[:20]:
+            cv2.circle(vis, (int(cx), int(cy)), int(r), (0, 165, 255), 1)
+        return DetectionResult(
+            success=False,
+            message=f"安装孔检测: {len(selected)}/4 成功",
+            data={
+                "hole_centers_px": [(0.0, 0.0)] * 4,
+                "hole_radii_px": [0.0] * 4,
+                "individual_success": [False] * 4,
+                "visualization": vis,
+                "hole_candidates": candidates,
+            },
+        )
 
-        expected_in_roi = (ex - x1, ey - y1)
-        result = detect_hole_in_roi(roi_gray, min_r, max_r, expected_in_roi)
+    centers = [(c[1], c[2]) for c in selected]
+    order = _order_holes(centers)
+    selected = [selected[i] for i in order]
 
-        if result is not None:
-            cx_roi, cy_roi, r = result
-            cx_full = cx_roi + x1
-            cy_full = cy_roi + y1
-            hole_centers.append((cx_full, cy_full))
-            hole_radii.append(r)
-            individual_success.append(True)
-
-            cv2.circle(vis, (int(cx_full), int(cy_full)), int(r), (0, 255, 0), 2)
-            cv2.circle(vis, (int(cx_full), int(cy_full)), 3, (0, 0, 255), -1)
-            cv2.putText(vis, f"H{i+1}", (int(cx_full) + 10, int(cy_full) - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
-        else:
-            hole_centers.append((0.0, 0.0))
-            hole_radii.append(0.0)
-            individual_success.append(False)
-
-        cv2.rectangle(vis, (x1, y1), (x2, y2), (255, 255, 0), 1)
-        cv2.drawMarker(vis, (ex, ey), (255, 255, 0),
-                       cv2.MARKER_CROSS, 8, 1)
-
-    num_ok = sum(individual_success)
+    hole_centers = []
+    hole_radii = []
+    for i, (_, cx, cy, r) in enumerate(selected):
+        hole_centers.append((float(cx), float(cy)))
+        hole_radii.append(float(r))
+        cv2.circle(vis, (int(cx), int(cy)), int(r), (0, 255, 0), 2)
+        cv2.circle(vis, (int(cx), int(cy)), 3, (0, 0, 255), -1)
+        cv2.putText(vis, f"H{i+1}", (int(cx) + 10, int(cy) - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
 
     return DetectionResult(
-        success=(num_ok == 4),
-        message=f"安装孔检测: {num_ok}/4 成功" if num_ok < 4
-                else "四个安装孔全部检测成功",
+        success=True,
+        message="四个安装孔全部检测成功",
         data={
             "hole_centers_px": hole_centers,
             "hole_radii_px": hole_radii,
-            "individual_success": individual_success,
+            "individual_success": [True] * 4,
             "visualization": vis,
-            "expected_positions_px": expected_positions_px,
+            "hole_candidates": candidates,
         },
     )
