@@ -1,11 +1,4 @@
-"""
-Fallback quadrilateral recovery for severe highlight adhesion.
-
-This module is intentionally limited to image evidence from the PCB mask:
-it does not use hole pitch, board size, square aspect ratio, or fixed object
-position. The only object-level assumption is that the target outer boundary
-can be represented by a quadrilateral.
-"""
+"""强光斑粘连场景下的 PCB 四边形恢复。"""
 
 from typing import List, Optional, Tuple
 
@@ -47,12 +40,7 @@ def recover_quad_from_mask(
     min_run_height_ratio: float = 0.20,
     min_interval_width_ratio: float = 0.08,
 ) -> Optional[Tuple[np.ndarray, float, dict]]:
-    """
-    Recover a quadrilateral from a mask whose main component is stuck to glare.
-
-    Returns:
-        (corners, score, diagnostics) or None.
-    """
+    """从粘连或残缺 mask 中恢复 PCB 外框四边形。"""
     if mask is None:
         return None
 
@@ -98,7 +86,7 @@ def recover_quad_from_mask(
     left_x = np.array([r[1] for r in best_run], dtype=np.float32)
     right_x = np.array([r[2] for r in best_run], dtype=np.float32)
 
-    # Robustly ignore a few ragged rows at both ends.
+    # 去除首尾少量不稳定行。
     lo = int(len(best_run) * 0.03)
     hi = max(lo + 2, int(len(best_run) * 0.97))
     fit_y = ys[lo:hi]

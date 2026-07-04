@@ -153,13 +153,13 @@ def process_single(
         "num_holes": sum(hole_result.data.get("individual_success", [False] * 4)),
         **measurement,
         "remark": " | ".join(remark_parts).strip(),
-        # 新增统计字段
+        # 统计字段
         "board_score": board_result.data.get("score") if board_result.success else None,
         "num_components_before": n_components_before,
         "num_components_after": n_components_after,
         "separation_modified": separation_modified,
         "quad_recovery_used": quad_recovery_used,
-        # 详细中间产物
+        # 中间产物
         "preproc_results": preproc_results,
         "board_result": board_result,
         "hole_result": hole_result,

@@ -116,11 +116,7 @@ def detect_hole_in_roi(
     max_radius: int = 300,
     expected_center: Optional[Tuple[float, float]] = None,
 ) -> Optional[Tuple[float, float, float]]:
-    """
-    兼容旧接口：在 ROI 内检测最可信圆孔。
-
-    expected_center 参数保留但不用于已知孔位先验，只作为旧调用兼容。
-    """
+    """在 ROI 内检测最可信圆孔。"""
     result = _find_hole_candidates(roi_gray, min_radius, max_radius)
     if not result:
         return None
@@ -220,6 +216,248 @@ def _find_hole_candidates(
     return _deduplicate_candidates(candidates)
 
 
+def _sample_radial_profile(
+    gray: np.ndarray,
+    cx: float,
+    cy: float,
+    max_radius: int,
+    num_angles: int = 96,
+) -> Optional[np.ndarray]:
+    """采样以孔心为中心的径向灰度均值曲线。"""
+    h, w = gray.shape[:2]
+    if max_radius < 4:
+        return None
+
+    angles = np.linspace(0.0, 2.0 * np.pi, num_angles, endpoint=False)
+    cos_a = np.cos(angles)
+    sin_a = np.sin(angles)
+    profile = []
+
+    for r in range(max_radius + 1):
+        xs = np.rint(cx + r * cos_a).astype(np.int32)
+        ys = np.rint(cy + r * sin_a).astype(np.int32)
+        valid = (xs >= 0) & (ys >= 0) & (xs < w) & (ys < h)
+        if np.count_nonzero(valid) < num_angles * 0.65:
+            profile.append(np.nan)
+            continue
+        profile.append(float(np.mean(gray[ys[valid], xs[valid]])))
+
+    profile_arr = np.asarray(profile, dtype=np.float32)
+    if np.count_nonzero(np.isfinite(profile_arr)) < 8:
+        return None
+    return profile_arr
+
+
+def _refine_hole_radius_by_intensity(
+    gray: np.ndarray,
+    cx: float,
+    cy: float,
+    initial_radius: float,
+    min_radius: int,
+    max_radius: int,
+) -> float:
+    """
+    基于径向灰度剖面精修孔半径。
+
+    候选检测阶段的外接圆容易把焊盘黑环、阴影或板边背景一起包进去；
+    这里只寻找“暗孔区域 -> 较亮 PCB 表面”的第一处稳定跃迁。
+    不使用孔径标称值。
+    """
+    if gray is None or initial_radius <= 0:
+        return float(initial_radius)
+
+    h, w = gray.shape[:2]
+    safe_max = int(min(max_radius, cx, cy, w - 1 - cx, h - 1 - cy))
+    if safe_max <= max(4, min_radius):
+        return float(initial_radius)
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
+
+    search_max = max(
+        min_radius + 3,
+        int(min(safe_max, max(max_radius * 0.95, initial_radius * 1.15))),
+    )
+    profile = _sample_radial_profile(blurred, cx, cy, search_max)
+    if profile is None:
+        return float(initial_radius)
+
+    valid = np.isfinite(profile)
+    if not np.any(valid):
+        return float(initial_radius)
+
+    # 用线性插值补齐少量越界点，再平滑，避免单个焊盘孔或丝印造成尖峰。
+    radii = np.arange(len(profile), dtype=np.float32)
+    profile = np.interp(radii, radii[valid], profile[valid]).astype(np.float32)
+    kernel = np.ones(5, dtype=np.float32) / 5.0
+    smooth = np.convolve(profile, kernel, mode="same")
+
+    inner_end = max(3, int(min_radius * 0.75))
+    inner_level = float(np.percentile(smooth[:inner_end + 1], 35))
+    outer_start = max(inner_end + 2, int(search_max * 0.55))
+    outer_level = float(np.percentile(smooth[outer_start:], 70))
+    contrast = outer_level - inner_level
+    if contrast < 8.0:
+        return float(initial_radius)
+
+    start = max(3, int(min_radius * 0.65))
+    stop = max(start + 3, search_max - 2)
+    threshold = inner_level + 0.32 * contrast
+
+    crossing_radius = None
+    for r in range(start, stop):
+        if smooth[r] >= threshold:
+            crossing_radius = float(r)
+            break
+
+    gradient = np.gradient(smooth)
+    grad_slice = gradient[start:stop]
+    edge_radius = float(start + int(np.argmax(grad_slice))) if len(grad_slice) else None
+
+    if crossing_radius is not None and edge_radius is not None:
+        refined = 0.78 * crossing_radius + 0.22 * edge_radius
+    elif crossing_radius is not None:
+        refined = crossing_radius
+    elif edge_radius is not None:
+        refined = edge_radius
+    else:
+        return float(initial_radius)
+
+    lower = max(3.0, min_radius * 0.65)
+    upper = min(float(safe_max), max_radius * 0.9)
+    refined = float(np.clip(refined, lower, upper))
+
+    # 极端跳变通常来自板边背景或丝印，保留原候选半径更稳。
+    if refined > initial_radius * 1.8 or refined < initial_radius * 0.25:
+        return float(initial_radius)
+
+    return refined
+
+
+def _refine_hole_radius_by_dark_component(
+    gray: np.ndarray,
+    cx: float,
+    cy: float,
+    initial_radius: float,
+    min_radius: int,
+    max_radius: int,
+) -> Optional[float]:
+    """
+    用孔心附近的暗连通域估计孔半径。
+
+    相比最小外接圆，面积等效半径对焊盘外缘毛刺和局部阴影更不敏感。
+    """
+    if gray is None or initial_radius <= 0:
+        return None
+
+    h, w = gray.shape[:2]
+    roi_r = int(max(min_radius * 2.0, min(max_radius, initial_radius * 1.35)))
+    x1 = max(0, int(round(cx - roi_r)))
+    y1 = max(0, int(round(cy - roi_r)))
+    x2 = min(w, int(round(cx + roi_r + 1)))
+    y2 = min(h, int(round(cy + roi_r + 1)))
+    if x2 - x1 < 8 or y2 - y1 < 8:
+        return None
+
+    roi = gray[y1:y2, x1:x2]
+    local_cx = int(round(cx - x1))
+    local_cy = int(round(cy - y1))
+    if not (0 <= local_cx < roi.shape[1] and 0 <= local_cy < roi.shape[0]):
+        return None
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(roi)
+    blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
+
+    yy, xx = np.ogrid[:roi.shape[0], :roi.shape[1]]
+    dist = np.sqrt((xx - local_cx) ** 2 + (yy - local_cy) ** 2)
+    inner_mask = dist <= max(2.0, min_radius * 0.55)
+    outer_mask = (dist >= max(min_radius * 1.2, roi_r * 0.45)) & (dist <= roi_r)
+    if not np.any(inner_mask) or not np.any(outer_mask):
+        return None
+
+    inner_level = float(np.percentile(blurred[inner_mask], 45))
+    outer_level = float(np.percentile(blurred[outer_mask], 70))
+    contrast = outer_level - inner_level
+    if contrast < 6.0:
+        return None
+
+    threshold = inner_level + 0.46 * contrast
+    dark = (blurred <= threshold).astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, kernel, iterations=1)
+    dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        (dark > 0).astype(np.uint8), connectivity=8
+    )
+    if num_labels <= 1:
+        return None
+
+    center_label = labels[local_cy, local_cx]
+    if center_label == 0:
+        search = labels[
+            max(0, local_cy - 2): min(labels.shape[0], local_cy + 3),
+            max(0, local_cx - 2): min(labels.shape[1], local_cx + 3),
+        ]
+        labels_nonzero = search[search > 0]
+        if labels_nonzero.size == 0:
+            return None
+        center_label = int(np.bincount(labels_nonzero.ravel()).argmax())
+
+    area = float(stats[center_label, cv2.CC_STAT_AREA])
+    if area <= 0:
+        return None
+
+    component = labels == center_label
+    comp_ys, comp_xs = np.where(component)
+    comp_dist = np.sqrt((comp_xs - local_cx) ** 2 + (comp_ys - local_cy) ** 2)
+    if comp_dist.size == 0:
+        return None
+
+    area_radius = float(np.sqrt(area / np.pi))
+    radial_radius = float(np.percentile(comp_dist, 82))
+    refined = 0.72 * area_radius + 0.28 * radial_radius
+    refined = float(np.clip(refined, max(3.0, min_radius * 0.65), max_radius * 0.9))
+
+    if refined > initial_radius * 1.45 or refined < initial_radius * 0.22:
+        return None
+    return refined
+
+
+def _stabilize_radii_consistency(radii: List[float]) -> List[float]:
+    """
+    对同一张 PCB 的四个安装孔半径做离群抑制。
+
+    这里不使用孔径标准值，只利用同一图像中四个安装孔属于同类孔这一事实；
+    过小的半径通常来自径向剖面被噪声提前截断，过大的半径通常来自阴影/焊盘被并入。
+    """
+    if len(radii) < 4:
+        return radii
+
+    arr = np.asarray(radii, dtype=np.float32)
+    finite = np.isfinite(arr) & (arr > 0)
+    if np.count_nonzero(finite) < 3:
+        return radii
+
+    med = float(np.median(arr[finite]))
+    if med <= 0:
+        return radii
+
+    stabilized = []
+    for r in arr:
+        if not np.isfinite(r) or r <= 0:
+            stabilized.append(float(r))
+            continue
+        ratio = float(r / med)
+        if ratio < 0.72 or ratio > 1.28:
+            stabilized.append(med)
+        else:
+            stabilized.append(float(r))
+    return stabilized
+
+
 def detect_all_holes(
     warped_gray: np.ndarray,
     board_size_px: Tuple[int, int],
@@ -265,10 +503,43 @@ def detect_all_holes(
 
     hole_centers = []
     hole_radii = []
-    for i, (_, cx, cy, r) in enumerate(selected):
+    radial_radii = []
+    component_radii = []
+    for _, cx, cy, r in selected:
+        radial_r = _refine_hole_radius_by_intensity(
+            warped_gray, cx, cy, r, min_r, max_r
+        )
+        component_r = _refine_hole_radius_by_dark_component(
+            warped_gray, cx, cy, r, min_r, max_r
+        )
+        radial_radii.append(float(radial_r))
+        component_radii.append(float(component_r) if component_r is not None else np.nan)
+
+    refined_radii = _stabilize_radii_consistency(radial_radii)
+
+    finite_radii = np.asarray(refined_radii, dtype=np.float32)
+    valid = np.isfinite(finite_radii) & (finite_radii > 0)
+    group_median = float(np.median(finite_radii[valid])) if np.any(valid) else np.nan
+
+    # 暗连通域仅用于抑制明显偏大的径向半径估计。
+    if np.isfinite(group_median) and group_median > 0:
+        guarded_radii = []
+        for radial_r, component_r in zip(refined_radii, component_radii):
+            if (
+                np.isfinite(component_r)
+                and component_r > group_median * 0.72
+                and component_r < radial_r
+                and radial_r > group_median * 1.18
+            ):
+                guarded_radii.append(float(0.55 * radial_r + 0.45 * component_r))
+            else:
+                guarded_radii.append(float(radial_r))
+        refined_radii = _stabilize_radii_consistency(guarded_radii)
+
+    for i, ((_, cx, cy, _), refined_r) in enumerate(zip(selected, refined_radii)):
         hole_centers.append((float(cx), float(cy)))
-        hole_radii.append(float(r))
-        cv2.circle(vis, (int(cx), int(cy)), int(r), (0, 255, 0), 2)
+        hole_radii.append(float(refined_r))
+        cv2.circle(vis, (int(cx), int(cy)), int(refined_r), (0, 255, 0), 2)
         cv2.circle(vis, (int(cx), int(cy)), 3, (0, 0, 255), -1)
         cv2.putText(vis, f"H{i+1}", (int(cx) + 10, int(cy) - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
