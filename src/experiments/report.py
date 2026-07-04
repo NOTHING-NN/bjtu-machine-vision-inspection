@@ -45,6 +45,32 @@ from src.utils import save_image
 # 叠加绘制函数
 # ============================================================
 
+def _draw_text_box(
+    image: np.ndarray,
+    text: str,
+    origin: Tuple[int, int],
+    font_scale: float = 0.75,
+    color: Tuple[int, int, int] = (255, 255, 255),
+    bg_color: Tuple[int, int, int] = (20, 20, 20),
+    thickness: int = 2,
+    pad: int = 6,
+) -> None:
+    """绘制带半透明底色的清晰文字标签。"""
+    x, y = origin
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+    x1 = max(0, x - pad)
+    y1 = max(0, y - th - baseline - pad)
+    x2 = min(image.shape[1] - 1, x + tw + pad)
+    y2 = min(image.shape[0] - 1, y + baseline + pad)
+
+    overlay = image.copy()
+    cv2.rectangle(overlay, (x1, y1), (x2, y2), bg_color, -1)
+    cv2.addWeighted(overlay, 0.72, image, 0.28, 0, dst=image)
+    cv2.putText(image, text, (x, y), font, font_scale, color,
+                thickness, cv2.LINE_AA)
+
+
 def draw_board_corners(
     image: np.ndarray,
     corners: np.ndarray,
@@ -74,6 +100,7 @@ def draw_holes(
     image: np.ndarray,
     hole_centers: List[Tuple[float, float]],
     hole_radii: List[float],
+    hole_diameters_mm: List[float] = None,
     color: Tuple[int, int, int] = (0, 255, 0),
     thickness: int = 2,
 ) -> np.ndarray:
@@ -86,11 +113,97 @@ def draw_holes(
     for i, ((cx, cy), r) in enumerate(zip(hole_centers, hole_radii)):
         if r > 0:
             center = (int(cx), int(cy))
-            cv2.circle(vis, center, int(r), color, thickness)
-            cv2.circle(vis, center, 3, (0, 0, 255), -1)
+            cv2.circle(vis, center, int(r), (0, 180, 0), max(thickness + 4, 6))
+            cv2.circle(vis, center, int(r), color, max(thickness + 1, 3))
+            cv2.circle(vis, center, 7, (0, 0, 255), -1)
+            cv2.circle(vis, center, 11, (255, 255, 255), 2)
             if i < len(labels):
-                cv2.putText(vis, labels[i], (center[0] + 10, center[1] - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+                label_text = labels[i]
+                if hole_diameters_mm is not None and i < len(hole_diameters_mm):
+                    d = hole_diameters_mm[i]
+                    if d is not None and not np.isnan(d):
+                        label_text = f"{label_text}  D={d:.2f}mm"
+
+                (tw, th), baseline = cv2.getTextSize(
+                    label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.85, 2
+                )
+                tx = center[0] + 14
+                if tx + tw + 14 >= vis.shape[1]:
+                    tx = center[0] - tw - 20
+                tx = max(10, min(tx, vis.shape[1] - tw - 10))
+                ty = max(center[1] - 14, th + baseline + 14)
+                if center[1] > int(vis.shape[0] * 0.75):
+                    ty = center[1] - max(72, int(r) * 3)
+                if ty + baseline + 8 >= vis.shape[0]:
+                    ty = max(th + baseline + 14, center[1] - int(r) - 18)
+                _draw_text_box(
+                    vis, label_text, (tx, ty),
+                    font_scale=0.85,
+                    color=(255, 255, 255),
+                    bg_color=(37, 99, 235),
+                    thickness=2,
+                )
+
+    return vis
+
+
+def draw_board_size_annotations(
+    image: np.ndarray,
+    board_width_mm: float = np.nan,
+    board_height_mm: float = np.nan,
+) -> np.ndarray:
+    """在俯视图上绘制板宽、板高尺寸箭头。"""
+    vis = image.copy()
+    h, w = vis.shape[:2]
+    if h <= 0 or w <= 0:
+        return vis
+
+    arrow_color = (255, 255, 0)
+    shadow = (0, 0, 0)
+    margin = max(26, int(min(w, h) * 0.035))
+    arrow_thickness = max(3, int(min(w, h) * 0.004))
+
+    if not np.isnan(board_width_mm):
+        y = h - margin
+        x1 = margin
+        x2 = w - margin
+        cv2.arrowedLine(vis, (x1, y), (x2, y), shadow,
+                        arrow_thickness + 3, tipLength=0.025)
+        cv2.arrowedLine(vis, (x2, y), (x1, y), shadow,
+                        arrow_thickness + 3, tipLength=0.025)
+        cv2.arrowedLine(vis, (x1, y), (x2, y), arrow_color,
+                        arrow_thickness, tipLength=0.025)
+        cv2.arrowedLine(vis, (x2, y), (x1, y), arrow_color,
+                        arrow_thickness, tipLength=0.025)
+        _draw_text_box(
+            vis, f"W = {board_width_mm:.2f} mm",
+            (max(margin, int(w * 0.40)), max(34, y - 14)),
+            font_scale=0.78,
+            color=(255, 255, 255),
+            bg_color=(2, 132, 199),
+            thickness=2,
+        )
+
+    if not np.isnan(board_height_mm):
+        x = w - margin
+        y1 = margin
+        y2 = h - margin
+        cv2.arrowedLine(vis, (x, y1), (x, y2), shadow,
+                        arrow_thickness + 3, tipLength=0.025)
+        cv2.arrowedLine(vis, (x, y2), (x, y1), shadow,
+                        arrow_thickness + 3, tipLength=0.025)
+        cv2.arrowedLine(vis, (x, y1), (x, y2), arrow_color,
+                        arrow_thickness, tipLength=0.025)
+        cv2.arrowedLine(vis, (x, y2), (x, y1), arrow_color,
+                        arrow_thickness, tipLength=0.025)
+        _draw_text_box(
+            vis, f"H = {board_height_mm:.2f} mm",
+            (max(10, x - 230), max(58, int(h * 0.50))),
+            font_scale=0.78,
+            color=(255, 255, 255),
+            bg_color=(2, 132, 199),
+            thickness=2,
+        )
 
     return vis
 
@@ -112,18 +225,18 @@ def draw_measurement_text(
     vis = image.copy()
 
     texts = [
-        f"Pitch X: {pitch_x_mm:.3f} mm  (error: {abs_error_x:.3f} mm)",
-        f"Pitch Y: {pitch_y_mm:.3f} mm  (error: {abs_error_y:.3f} mm)",
+        f"Pitch X = {pitch_x_mm:.3f} mm   err = {abs_error_x:.3f} mm",
+        f"Pitch Y = {pitch_y_mm:.3f} mm   err = {abs_error_y:.3f} mm",
     ]
 
     # 板尺寸
     if not np.isnan(board_width_mm):
         texts.append(
-            f"Board W: {board_width_mm:.3f} mm  (err: {board_width_error_mm:.3f}) [nom 100]"
+            f"Board W = {board_width_mm:.3f} mm   err = {board_width_error_mm:.3f} mm"
         )
     if not np.isnan(board_height_mm):
         texts.append(
-            f"Board H: {board_height_mm:.3f} mm  (err: {board_height_error_mm:.3f}) [nom 100]"
+            f"Board H = {board_height_mm:.3f} mm   err = {board_height_error_mm:.3f} mm"
         )
 
     # 孔直径
@@ -144,10 +257,24 @@ def draw_measurement_text(
         if coord_parts:
             texts.append("Hole Pos: " + "  ".join(coord_parts) + " mm")
 
-    y0 = 25
+    panel_lines = len(texts)
+    line_h = 32
+    panel_w = min(vis.shape[1] - 20, 900)
+    panel_h = panel_lines * line_h + 16
+    panel_x = 10
+    panel_y = max(10, int(vis.shape[0] * 0.14))
+    overlay = vis.copy()
+    cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h),
+                  (15, 23, 42), -1)
+    cv2.addWeighted(overlay, 0.78, vis, 0.22, 0, dst=vis)
+    cv2.rectangle(vis, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h),
+                  (148, 163, 184), 2)
+
+    y0 = panel_y + 28
     for i, text in enumerate(texts):
-        cv2.putText(vis, text, (10, y0 + i * 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        cv2.putText(vis, text, (panel_x + 14, y0 + i * line_h),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.72, (255, 255, 255),
+                    2, cv2.LINE_AA)
 
     return vis
 
@@ -333,7 +460,13 @@ def generate_report_figures(
                 vis = cv2.cvtColor(vis, cv2.COLOR_GRAY2BGR)
             if a_hole is not None and a_hole.success:
                 vis = draw_holes(vis, a_hole.data["hole_centers_px"],
-                                 a_hole.data["hole_radii_px"])
+                                 a_hole.data["hole_radii_px"],
+                                 algo_a_result.get("hole_diameters_mm"))
+            vis = draw_board_size_annotations(
+                vis,
+                algo_a_result.get("board_width_mm", np.nan),
+                algo_a_result.get("board_height_mm", np.nan),
+            )
             if not np.isnan(algo_a_result.get("pitch_x_mm", np.nan)):
                 vis = draw_measurement_text(
                     vis, algo_a_result["pitch_x_mm"],
@@ -384,7 +517,13 @@ def generate_report_figures(
                 vis = cv2.cvtColor(vis, cv2.COLOR_GRAY2BGR)
             if b_hole is not None and b_hole.success:
                 vis = draw_holes(vis, b_hole.data["hole_centers_px"],
-                                 b_hole.data["hole_radii_px"])
+                                 b_hole.data["hole_radii_px"],
+                                 algo_b_result.get("hole_diameters_mm"))
+            vis = draw_board_size_annotations(
+                vis,
+                algo_b_result.get("board_width_mm", np.nan),
+                algo_b_result.get("board_height_mm", np.nan),
+            )
             if not np.isnan(algo_b_result.get("pitch_x_mm", np.nan)):
                 vis = draw_measurement_text(
                     vis, algo_b_result["pitch_x_mm"],

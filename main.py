@@ -43,6 +43,41 @@ def _find_result_by_name(results: List[dict], name: str) -> dict:
     return None
 
 
+def _format_hole_diameters(result: dict) -> str:
+    """格式化单张图像的四个安装孔直径。"""
+    if not result.get("holes_detect_success"):
+        return "H1=N/A, H2=N/A, H3=N/A, H4=N/A"
+
+    parts = []
+    for i in range(1, 5):
+        value = result.get(f"hole{i}_diameter_mm")
+        if value is None:
+            parts.append(f"H{i}=N/A")
+        else:
+            try:
+                value = float(value)
+                if value != value:
+                    parts.append(f"H{i}=N/A")
+                else:
+                    parts.append(f"H{i}={value:.3f} mm")
+            except (TypeError, ValueError):
+                parts.append(f"H{i}=N/A")
+    return ", ".join(parts)
+
+
+def _print_per_image_hole_diameters(results: List[dict], title: str) -> None:
+    """打印逐图安装孔直径，保证最终输出包含每张图的孔径信息。"""
+    if not results:
+        return
+
+    print(f"\n  {title} - 逐图安装孔直径:")
+    for r in results:
+        name = r.get("image_name", "?")
+        stype = r.get("sample_type", "?")
+        status = "OK" if r.get("holes_detect_success") else "FAIL"
+        print(f"    {name} (类型 {stype}, {status}): {_format_hole_diameters(r)}")
+
+
 def _load_measurement_context():
     """加载相机参数和棋盘格测量平面单应性。"""
     from src.calibration import load_camera_params, load_measurement_plane_homography
@@ -89,6 +124,7 @@ def main() -> None:
         results = run_experiment(ALGORITHM_A_CONFIG, paths, camera_params, image_to_world)
         save_results_csv(results,
                          config.REPORTS_OUTPUT_DIR / "measurements_algorithm_a.csv")
+        _print_per_image_hole_diameters(results, "算法 A")
         print_grouped_summary(results)
 
     elif command in ("algorithm-b", "light_corrected"):
@@ -112,6 +148,7 @@ def main() -> None:
         results = run_experiment(ALGORITHM_B_CONFIG, paths, camera_params, image_to_world)
         save_results_csv(results,
                          config.REPORTS_OUTPUT_DIR / "measurements_algorithm_b.csv")
+        _print_per_image_hole_diameters(results, "算法 B")
         print_grouped_summary(results)
 
     elif command == "compare":
@@ -214,10 +251,12 @@ def main() -> None:
         print(f"\n  算法 A (基础测量，全部 {n_a} 张):")
         print(f"    板检测成功: {sum(1 for r in results_a if r['board_detect_success'])}/{n_a}")
         print(f"    孔检测成功: {n_a_ok_all}/{n_a}")
+        _print_per_image_hole_diameters(results_a, "算法 A")
 
         print(f"\n  算法 B (强光斑感知改进，仅 B 类 {n_b} 张):")
         print(f"    板检测成功: {sum(1 for r in results_b if r['board_detect_success'])}/{n_b}")
         print(f"    孔检测成功: {n_b_ok}/{n_b}")
+        _print_per_image_hole_diameters(results_b, "算法 B")
 
         # 公平对比：仅在 B 类样本上
         if summary_a_b.get("mean_abs_error_mm_mean") and summary_b.get("mean_abs_error_mm_mean"):
