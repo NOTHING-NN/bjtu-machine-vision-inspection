@@ -123,6 +123,10 @@ def recover_quad_from_mask(
 
     score = float(fill_ratio * run_score(best_run))
     diagnostics = {
+        # 诊断标签 "row_interval_quad"：
+        # 指“逐行扫描前景区间+线性拟合左右边界”的四边形恢复策略——
+        # 对 mask 每行取前景最大水平区间，合并为稳定行段后，
+        # 用 polyfit 拟合左右边界直线，再由行段首尾 y 坐标构造四角点。
         "recovery": "row_interval_quad",
         "run_height": int(len(best_run)),
         "fill_ratio": float(fill_ratio),

@@ -142,7 +142,7 @@ def process_single(
     elif separation_applied:
         remark_parts.append("region_separation=attempted")
     if quad_recovery_used:
-        remark_parts.append("quad_recovery=row_interval")
+        remark_parts.append("quad_recovery=row_interval")  # 逐行区间扫描+边界直线拟合，见 quad_recovery.py
 
     return {
         "image_name": image_name,
